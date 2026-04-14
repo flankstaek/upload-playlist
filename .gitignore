@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Windows NTFS alternate data streams that WSL surfaces as files
+*:Zone.Identifier
+
+# User data — if the plugin is ever pointed at a path inside the repo during testing
+*.m3u
+*.m3u8
+*.jsonl
+
+# Editor / OS
+.DS_Store
+*.swp

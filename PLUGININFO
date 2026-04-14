@@ -1,0 +1,4 @@
+Version = "2026-04-10r00"
+Authors = ["flankstaek"]
+Name = "Upload Playlist"
+Description = "Generates a live M3U playlist of files others have downloaded from you."
