@@ -22,32 +22,52 @@ A [Nicotine+](https://nicotine-plus.github.io/) plugin that writes a live M3U pl
 
 ## Settings
 
-- `playlist_path` — where to write the `.m3u` (default: `~/soulseek_uploads.m3u`)
+- `playlist_path` — where to write the playlist (default: `~/soulseek_uploads.m3u8`; `.m3u8` signals UTF-8 so non-ASCII paths resolve correctly)
 - `audio_extensions` — which file types to include (default: mp3, flac, m4a, aac, ogg, opus, wav, aiff, aif, wma, ape, wv)
 
 ## Install
 
-### Native (Linux / macOS / Windows)
-
-Copy `PLUGININFO` and `__init__.py` into a folder named `upload_playlist/` inside your Nicotine+ plugins directory:
+Nicotine+ loads plugins from a per-platform data directory. Whichever approach you use below, the plugin folder must be named `upload_playlist` (Nicotine+ uses the folder name as the internal plugin ID).
 
 | Platform | Plugins directory |
 |---|---|
-| Windows | `%APPDATA%\nicotine\plugins\upload_playlist\` |
-| macOS | `~/Library/Application Support/nicotine/plugins/upload_playlist/` |
-| Linux | `~/.local/share/nicotine/plugins/upload_playlist/` |
+| Windows | `%APPDATA%\nicotine\plugins\` |
+| macOS | `~/Library/Application Support/nicotine/plugins/` |
+| Linux | `~/.local/share/nicotine/plugins/` |
 
-Then: Nicotine+ → Preferences → Plugins → enable "Upload Playlist".
+After installing, enable the plugin: Nicotine+ → Preferences → Plugins → "Upload Playlist".
 
-### WSL → Windows (the primary dev flow)
+### Option A — clone directly into the plugins directory (simplest)
 
-`./install.sh` auto-detects `%APPDATA%` via `cmd.exe` + `wslpath` and copies the plugin files across. After editing, re-run `install.sh` and toggle the plugin off/on in Preferences to reload.
+Recommended if your working copy and Nicotine+ are on the same filesystem (native Linux, macOS, or Windows). Edits apply with just a plugin toggle in Preferences — no copy step.
 
-For a non-WSL install, override the destination:
+```
+cd ~/.local/share/nicotine/plugins    # or the equivalent path from the table above
+git clone https://tangled.org/flankstaek.me/upload-playlist upload_playlist
+```
+
+Note the rename: the repo is `upload-playlist` (dash) but the cloned folder must be `upload_playlist` (underscore).
+
+### Option B — clone anywhere, sync with `install.sh`
+
+Use this when your working copy can't live inside the plugins directory — most commonly when developing in WSL against a Windows-native Nicotine+, since Windows can't follow Linux symlinks. Also fine if you just prefer your source organized under a `~/dev/` root.
+
+```
+git clone https://tangled.org/flankstaek.me/upload-playlist
+cd upload-playlist
+./install.sh
+```
+
+`install.sh` auto-detects the destination:
+
+- **Under WSL:** reads `%APPDATA%` from Windows via `cmd.exe` and `wslpath`, writes to `$APPDATA/nicotine/plugins/upload_playlist/`
+- **Anywhere else:** set `NICOTINE_PLUGINS_DIR` to override
 
 ```
 NICOTINE_PLUGINS_DIR=~/.local/share/nicotine/plugins ./install.sh
 ```
+
+Re-run `install.sh` after each edit, then toggle the plugin off/on in Preferences to reload.
 
 ## Docs
 

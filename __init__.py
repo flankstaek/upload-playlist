@@ -12,7 +12,7 @@ class Plugin(BasePlugin):
         super().__init__(*args, **kwargs)
 
         self.settings = {
-            "playlist_path": os.path.join(os.path.expanduser("~"), "soulseek_uploads.m3u"),
+            "playlist_path": os.path.join(os.path.expanduser("~"), "soulseek_uploads.m3u8"),
             "audio_extensions": [
                 "mp3", "flac", "m4a", "aac", "ogg", "opus",
                 "wav", "aiff", "aif", "wma", "ape", "wv",

@@ -39,7 +39,7 @@ The plugin folder *is* the repo — Nicotine+ treats each plugin folder as self-
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
-| `playlist_path` | string | `~/soulseek_uploads.m3u` | Where to write the playlist |
+| `playlist_path` | string | `~/soulseek_uploads.m3u8` | Where to write the playlist |
 | `audio_extensions` | list string | `mp3, flac, m4a, aac, ogg, opus, wav, aiff, aif, wma, ape, wv` | Extensions to include; everything else is filtered out |
 
 ## Commands
@@ -60,6 +60,9 @@ Soulseek users download whole album folders — including cover art, logs, cue s
 
 ### Backfill merges all history sources
 `_find_uploads_sources()` returns *every* existing history file (not just the largest). `_write_backfill()` reads each, deduplicates rows on the `(user, virtual_path, real_dir)` tuple, then writes the merged set. This handles the case where `uploads.json` has current-session data and `uploads.json.old` has the previous session's — both can contribute.
+
+### `.m3u8` extension for UTF-8 path encoding
+The default playlist extension is `.m3u8`, not `.m3u`. Python always writes the file as UTF-8, but by informal convention `.m3u` is interpreted by players as the system's local codepage (cp1252 on Windows), while `.m3u8` is explicitly UTF-8. Paths containing non-ASCII characters (em dashes, middle dots, accented letters, etc.) round-trip correctly only under the `.m3u8` convention; under `.m3u` the player decodes UTF-8 bytes as cp1252 and looks for a file that doesn't exist on disk. We hit this in practice with a folder containing U+200E, U+00B7, and U+2014 — ASCII-only tracks in the same playlist played fine, non-ASCII ones silently failed.
 
 ### Cross-platform data-dir discovery
 `_nicotine_data_dirs()` branches on `sys.platform` to return the standard Nicotine+ data locations:
