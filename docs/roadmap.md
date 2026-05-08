@@ -40,13 +40,14 @@ Skipping for now: type checking (overkill at this size), coverage tools (vanity 
 | External player behavior on M3U rewrite (by-album mode) | manual, deferred to album-ordering work |
 
 **Tasks:**
-- [ ] Add `pyproject.toml` with `[project]` (dev deps: pytest, ruff), `[tool.pytest.ini_options]`, `[tool.ruff]` sections
-- [ ] Add `.gitignore` entries for `.venv/`, `.ruff_cache/`, `.pytest_cache/`
-- [ ] Add `tests/conftest.py` with `BasePlugin` shim
-- [ ] Add `tests/test_smoke.py` — single test that imports the plugin and instantiates it, proving the shim works
-- [ ] Add `tests/test_extensions.py` — `_is_playable` cases for the existing audio-extension filter (low-stakes warm-up test)
-- [ ] Document `uv sync` / `uv run pytest` / `uv run ruff check` in README dev section
-- [ ] Commit `uv.lock`
+- [x] Add `pyproject.toml` with `[project]` (dev deps: pytest, ruff), `[tool.pytest.ini_options]`, `[tool.ruff]` sections
+- [x] Add `.gitignore` entries for `.venv/`, `.ruff_cache/`, `.pytest_cache/`
+- [x] Add `tests/conftest.py` with `BasePlugin` shim
+- [x] Add `tests/test_smoke.py` — single test that imports the plugin and instantiates it, proving the shim works
+- [x] Add `tests/test_extensions.py` — `_is_playable` cases for the existing audio-extension filter (low-stakes warm-up test)
+- [x] Add `tests/test_data_dirs.py` — `_nicotine_data_dirs` cross-platform branches via mocked `sys.platform` and env vars
+- [x] Document `uv sync` / `uv run pytest` / `uv run ruff check` in README dev section
+- [x] Commit `uv.lock`
 
 Once this lands the SQLite work below can land alongside its tests in the same PR, instead of as a one-shot manual-smoke-tested change.
 
