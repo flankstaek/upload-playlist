@@ -7,15 +7,24 @@ from pynicotine.pluginsystem import BasePlugin
 
 
 class Plugin(BasePlugin):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.settings = {
             "playlist_path": os.path.join(os.path.expanduser("~"), "soulseek_uploads.m3u8"),
             "audio_extensions": [
-                "mp3", "flac", "m4a", "aac", "ogg", "opus",
-                "wav", "aiff", "aif", "wma", "ape", "wv",
+                "mp3",
+                "flac",
+                "m4a",
+                "aac",
+                "ogg",
+                "opus",
+                "wav",
+                "aiff",
+                "aif",
+                "wma",
+                "ape",
+                "wv",
             ],
         }
         self.metasettings = {
@@ -45,8 +54,7 @@ class Plugin(BasePlugin):
     def init(self):
         self._playlist_path = os.path.expanduser(self.settings["playlist_path"])
         is_new = (
-            not os.path.exists(self._playlist_path)
-            or os.path.getsize(self._playlist_path) == 0
+            not os.path.exists(self._playlist_path) or os.path.getsize(self._playlist_path) == 0
         )
 
         if is_new:
@@ -98,7 +106,7 @@ class Plugin(BasePlugin):
         merged = []
         for source in sources:
             try:
-                with open(source, "r", encoding="utf-8") as f:
+                with open(source, encoding="utf-8") as f:
                     rows = json.load(f)
             except (OSError, ValueError) as e:
                 self.log(f"Backfill: failed to read {source}: {e}")

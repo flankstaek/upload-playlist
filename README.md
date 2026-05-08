@@ -69,6 +69,19 @@ NICOTINE_PLUGINS_DIR=~/.local/share/nicotine/plugins ./install.sh
 
 Re-run `install.sh` after each edit, then toggle the plugin off/on in Preferences to reload.
 
+## Dev
+
+Requires [`uv`](https://docs.astral.sh/uv/).
+
+```
+uv sync                    # install dev deps into .venv/
+uv run pytest              # run tests
+uv run ruff check          # lint
+uv run ruff format         # format
+```
+
+Tests use a `pynicotine.pluginsystem.BasePlugin` shim in `tests/conftest.py` so `__init__.py` is importable outside Nicotine+. See [`docs/architecture.md`](docs/architecture.md) for what's covered by pytest vs. manual smoke testing.
+
 ## Docs
 
 - [`docs/architecture.md`](docs/architecture.md) — how it works, design decisions, and hard-won lessons

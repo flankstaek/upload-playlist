@@ -3,6 +3,11 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Dev tooling
+.venv/
+.ruff_cache/
+.pytest_cache/
+
 # Windows NTFS alternate data streams that WSL surfaces as files
 *:Zone.Identifier
 

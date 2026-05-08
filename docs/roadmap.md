@@ -2,47 +2,163 @@
 
 Iterative plan. Ordered roughly by priority and dependency — earlier items unblock later ones.
 
-## Now: verify the live hook
+## Done: verify the live hook
 
-**Status:** pending real-world test.
+Confirmed firing on real uploads — entries land in the M3U and play in external players.
 
-We need to confirm that `upload_finished_notification` actually fires and writes a valid entry to the playlist when another Soulseek user finishes downloading an audio file. Until we see one real capture we haven't proven the plugin works end to end.
+## Now: dev tooling + test harness
 
-- [ ] Leave plugin enabled, wait for organic upload
-- [ ] Confirm entry appears in `~/soulseek_uploads.m3u`
-- [ ] Confirm the `real_path` in the entry actually plays in a media player
+**Why:** the SQLite work that follows is the first non-trivial logic change to the plugin. Up to now we've shipped on manual smoke tests (toggle plugin in Nicotine+, watch chat log). That worked when the whole plugin was ~30 lines of "open file, append two strings"; it scales badly once we have a DB schema, a regeneration path, ordering modes, and dedup. We want a fast feedback loop *before* we start writing that code, not after.
 
-## Next: own our history (persistent log)
+**Constraints shaping the choice:**
+- Runtime stays stdlib-only — Nicotine+ ships its own Python and we can't install packages into it. All tooling is dev-only and never reaches end users.
+- "Plugin folder *is* the repo" must hold — Nicotine+ uses the folder name as plugin ID, so we can't move `__init__.py` under a `src/` subdirectory.
+- `pynicotine` isn't pip-installable (it's a desktop application, not a library). Tests that import the plugin must shim `pynicotine.pluginsystem.BasePlugin` before import.
+
+**Stack:**
+- **`uv`** for environment + dependency management (replaces `pip` + `venv` + `pyenv` + `pip-tools` etc.)
+- **`pytest`** for tests (with `tmp_path` fixture for filesystem isolation)
+- **`ruff`** for lint + format (replaces `flake8` + `black` + `isort`)
+- **`pyproject.toml`** for all config (no `setup.py`, no `setup.cfg`)
+
+Skipping for now: type checking (overkill at this size), coverage tools (vanity at this size), `tox`/`nox` (single Python version), pre-commit hooks (solo project, manual `ruff format` is fine).
+
+**`BasePlugin` shim:** `tests/conftest.py` injects a fake `pynicotine.pluginsystem` module into `sys.modules` before plugin import. Fake `BasePlugin` is ~5 lines (no-op `__init__`, `log`, `output`). We're testing against our model of the API rather than the real one, but lifecycle bugs (e.g. accessing settings before `init()`) get caught by manual smoke-testing in Nicotine+ anyway, which is the right tool for that class of bug.
+
+**What gets tested vs not:**
+
+| Surface | Tested via |
+|---|---|
+| DB schema creation, idempotency | pytest |
+| `_record_upload` dedup behavior under `INSERT OR IGNORE` | pytest |
+| `_regenerate_m3u` output for each ordering mode | pytest |
+| Backfill idempotency under repeat runs | pytest |
+| `_is_playable` extension filtering | pytest |
+| Cross-platform data-dir discovery (mock `sys.platform`) | pytest |
+| Plugin loads inside Nicotine+, settings appear in UI | manual smoke test |
+| `upload_finished_notification` actually fires on real upload | manual smoke test (already passing) |
+| External player behavior on M3U rewrite (by-album mode) | manual, deferred to album-ordering work |
+
+**Tasks:**
+- [ ] Add `pyproject.toml` with `[project]` (dev deps: pytest, ruff), `[tool.pytest.ini_options]`, `[tool.ruff]` sections
+- [ ] Add `.gitignore` entries for `.venv/`, `.ruff_cache/`, `.pytest_cache/`
+- [ ] Add `tests/conftest.py` with `BasePlugin` shim
+- [ ] Add `tests/test_smoke.py` — single test that imports the plugin and instantiates it, proving the shim works
+- [ ] Add `tests/test_extensions.py` — `_is_playable` cases for the existing audio-extension filter (low-stakes warm-up test)
+- [ ] Document `uv sync` / `uv run pytest` / `uv run ruff check` in README dev section
+- [ ] Commit `uv.lock`
+
+Once this lands the SQLite work below can land alongside its tests in the same PR, instead of as a one-shot manual-smoke-tested change.
+
+## Next: own our history (SQLite store)
 
 **Why:** `uploads.json(.old)` is rolling state, not a log. Nicotine+ overwrites it on rotation and historical data is lost. To support real dedup, stats, re-exports, or richer playlists, the plugin needs to own its own store.
 
-- [ ] Add a plugin-owned JSON log file (e.g. `upload_playlist_history.json` next to the M3U, or in the plugin's config dir)
-- [ ] Write a structured record on every `upload_finished_notification`: timestamp, user, virtual_path, real_path, file size
-- [ ] On `init()`, if the M3U is missing but the history JSON exists, rebuild the M3U from the JSON (the JSON becomes the source of truth)
-- [ ] Keep the `uploads.json` backfill as a one-time seed for new installs
+**Backend:** SQLite (`sqlite3` is stdlib). Chosen over JSONL because the upcoming features (ordering, dedup, stats, per-user playlists) are all naturally SQL queries — `ORDER BY`, `GROUP BY`, `UNIQUE` indexes for write-time dedup, indexed lookups for stats. A flat file would force us to reimplement those by hand. At realistic scale (~180k rows over years for a heavy uploader, ~36 MB) bytes are not the constraint; ergonomics are.
 
-Once this lands, all subsequent features operate against the owned log rather than Nicotine+'s rolling state.
+**Storage location:** `<playlist_path>.history.db` — derived from existing `playlist_path` setting, no new setting needed. Moving the playlist moves the history.
+
+**Schema (v1):**
+```sql
+CREATE TABLE uploads (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT NOT NULL,        -- ISO-8601, sortable as text
+    user         TEXT NOT NULL,
+    virtual_path TEXT NOT NULL,        -- backslash-separated, Soulseek-side
+    real_path    TEXT NOT NULL,        -- local filesystem path
+    size         INTEGER,              -- bytes; NULL if file gone at backfill time
+    source       TEXT NOT NULL         -- 'live' | 'backfill'
+);
+CREATE INDEX idx_uploads_ts       ON uploads(ts);
+CREATE INDEX idx_uploads_realdir  ON uploads(real_path);
+CREATE UNIQUE INDEX idx_uploads_dedup
+    ON uploads(user, virtual_path, real_path);
+PRAGMA user_version = 1;
+```
+
+The `UNIQUE` index gives write-time dedup for free — re-running backfill becomes idempotent via `INSERT OR IGNORE`. No in-memory `seen` set.
+
+**Connection lifecycle:** open-per-write (mirrors the existing M3U pattern). No long-lived connection on `self`. Per-event: `connect → INSERT OR IGNORE → commit → close` — ~hundreds of microseconds, negligible at upload frequency. Backfill wraps all inserts in a single transaction (~100x faster than per-row commit). WAL mode (`PRAGMA journal_mode=WAL`) so stats queries don't block live inserts.
+
+**Architectural shift — M3U becomes a derived projection:**
+- DB is source of truth (append-only via `INSERT OR IGNORE`).
+- Live writes do *both*: insert to DB **and** append one entry-pair to the M3U — keeps the chronological hot path append-only.
+- Mode-changing operations (ordering setting changed, dedup toggled, `/playlist-reload`) regenerate the entire M3U from a single `SELECT … ORDER BY …`.
+- Regenerations use **temp-file + `os.replace`** for atomic swap so external players never see a partial M3U.
+
+**Helpers to add (all small):**
+- `_history_db_path` — property derived from `playlist_path`
+- `_db_connect()` — opens connection, sets WAL pragma
+- `_db_init()` — `CREATE TABLE IF NOT EXISTS …`, idempotent, called from `init()`
+- `_record_upload(user, vpath, rpath, size, source)` — single `INSERT OR IGNORE`, used by both live hook and backfill
+- `_regenerate_m3u()` — writes to `<playlist_path>.tmp`, then `os.replace`. Used by mode changes and `/playlist-reload`.
+- `_select_for_ordering(conn, mode)` — encapsulates mode→SQL mapping
+
+**Init / migration cases:**
+
+| Case | Behavior |
+|---|---|
+| DB exists | Use it. Don't touch M3U unless explicitly reloaded. |
+| DB missing, M3U missing | Create DB, run `uploads.json` backfill into DB, then `_regenerate_m3u()`. |
+| DB missing, M3U exists | Existing user upgrading. Create empty DB. **Don't** parse M3U back — `#EXTINF` is lossy (no size, no structured timestamp). Old entries live only in M3U; new ones flow through both. |
+| DB schema older than code | `PRAGMA user_version` check + migration. Out of scope for v1, hook is in place. |
+
+**Backfill timestamps:** `uploads.json` rows don't carry timestamps. Use `os.stat(real_path).st_mtime` if file exists; sentinel/NULL if not. NULLs sort first in chronological view → backfill entries appear at top of playlist (intuitive: history first, then new captures).
+
+**Tasks:**
+- [ ] Add `_history_db_path` property and `_db_connect`/`_db_init` helpers
+- [ ] Wire `_db_init()` into `init()` lifecycle
+- [ ] Add `_record_upload()` and call from `upload_finished_notification` (in addition to existing M3U append)
+- [ ] Refactor `_write_backfill()` to write to DB inside one transaction, then call `_regenerate_m3u()` once at end
+- [ ] Implement `_regenerate_m3u()` with temp-file + `os.replace`
+- [ ] Add `/playlist-reload` command that calls `_regenerate_m3u()`
+
+Once this lands, all subsequent features operate against the owned DB rather than Nicotine+'s rolling state.
 
 ## Then: dedup
 
 **Why:** repeat uploads of the same file (by the same or different users) currently stack up in the M3U. User wants a clean playlist without duplicate entries.
 
-Open design questions:
-- Dedup key: by `real_path` alone? Or `(real_path, user)`? The former gives "one entry per file ever uploaded"; the latter gives "one entry per file per downloader."
-- What about re-running backfill? Currently it happily writes duplicates. Should dedup be enforced at write time (in-memory set) or at read time (rebuild M3U from history JSON)?
-- Does the user want the most recent upload to "bubble up" in the playlist, or stay in its original position?
+With SQLite in place this is mostly a presentation question — the DB is already deduped at the `(user, virtual_path, real_path)` level via `UNIQUE`. M3U dedup is a `SELECT DISTINCT` (or `GROUP BY real_path`) on regeneration.
 
-Leaning toward: rebuild-from-history-on-dedup. Once the history JSON exists, the M3U becomes a derived artifact that can be regenerated with any dedup strategy the user picks.
+Open design questions:
+- Dedup key for the M3U view: `real_path` alone (one entry per file, regardless of who downloaded it) vs `(real_path, user)` (one entry per file per downloader). The DB keeps full granularity either way; this is just the projection.
+- Does the user want the most-recent upload of a file to "bubble up" in the playlist, or stay in its original position? `MAX(ts)` vs `MIN(ts)` in the `ORDER BY`.
 
 ## Then: album ordering
 
 **Why:** M3U entries currently land in upload chronological order. User wants tracks grouped by album so the playlist plays as cohesive listens.
 
-Open design questions:
-- Group by parent directory of `real_path`? (Usually accurate — Soulseek shares are folder-per-album.)
-- Within a group, sort by filename (which usually embeds track number) or by metadata (requires parsing tags — extra dependency)?
-- Mix ordering strategies via a setting: `chronological | by-album | by-artist-album`?
-- Does grouping break the "live append" model? Yes — a new upload in an old album would need to be inserted, not appended. This means regenerating the whole M3U on each write, which is fine at these file sizes but is a departure from the append-only model.
+**New setting:**
+```python
+"ordering": {
+    "description": "How to order playlist entries",
+    "type": "dropdown",
+    "options": ["chronological", "by-album"],
+}
+```
+Default `"chronological"` to preserve existing behavior.
+
+**Implementation:**
+- `chronological` → `ORDER BY ts ASC` (NULLs first, so backfill entries lead)
+- `by-album` → `ORDER BY real_path` (groups same-folder files naturally), within group filename order (which usually embeds track number)
+- Setting change → `_regenerate_m3u()`
+
+**Within-album sort:** start with filename order. It works for properly-named rips and adds zero dependencies. Only revisit metadata-tag parsing if filename order produces visibly wrong results in real use.
+
+**Live writes in `by-album` mode:** full M3U regen on every event via temp-file + `os.replace`. At realistic scale this is microseconds of work. Append-only optimization stays for chronological mode (where regen and append produce identical output).
+
+**Tradeoffs considered (decided against, but documented):**
+
+We considered a *buffering / deferred-flush* approach where in `by-album` mode the live hook would only write to the DB, and the M3U would be appended in album-grouped chunks once we "knew" an album was complete. We decided against it because:
+
+- **There is no "album complete" event from Soulseek.** Any flush trigger has to be inferred (different album appears, idle timeout, file-count heuristic), and every inference has a real failure mode (last album of session never flushes; concurrent downloads thrash; slow-link gaps false-trigger; needs a `threading.Timer` lifecycle inside the plugin).
+- **Late arrivals fragment albums anyway.** Once an album block is appended, a track for that album arriving an hour later either appends as a duplicate album block (defeats the feature) or forces an insert (= full regen by another name). Append-only and "tracks grouped by album" are fundamentally in tension when late arrivals are guaranteed.
+- **Full regen + `os.replace` solves the only real concern (truncated reads by external players) cleanly** in ~one line of code.
+
+The one remaining concern with full regen is **player playback-position tracking** — players that key "currently playing" by line index could jump on reorder. Most modern players re-resolve by path and tolerate this fine, but it's untested in our setup.
+
+**Test before shipping by-album mode:** open the regenerated M3U in the actual target player (VLC, foobar2000, whatever the user uses), start playback, trigger an upload event mid-playback, and confirm the player either continues on the same file or handles the reload gracefully. If it causes audible disruption, the fallback is **debounced regen** — coalesce bursts of upload events into a single rewrite N seconds after the last event (still uses `os.replace`, just batches the writes). This is a write-coalescer, not a correctness mechanism, so its scope is bounded even with the `threading.Timer` complexity.
 
 Depends on: persistent history (so we can regenerate).
 

@@ -26,6 +26,35 @@ The plugin folder *is* the repo — Nicotine+ treats each plugin folder as self-
 - Windows can't follow Linux symlinks, so `install.sh` copies `PLUGININFO` and `__init__.py` into the Windows plugins dir
 - After running `install.sh`, toggle the plugin off/on in Nicotine+ Preferences → Plugins to reload
 
+## Tooling and tests
+
+The plugin's *runtime* is stdlib-only — Nicotine+ ships its own Python and can't install packages, so nothing we add to dev tooling reaches end users.
+
+**Dev stack:**
+- `uv` for environment + dependency management (one Rust binary; replaces `pip` + `venv` + `pyenv` + `pip-tools`)
+- `pytest` for unit tests
+- `ruff` for lint + format (replaces `flake8` + `black` + `isort`)
+- `pyproject.toml` for all config
+
+Common commands: `uv sync`, `uv run pytest`, `uv run ruff check`, `uv run ruff format`.
+
+**Why no `src/` layout:** Nicotine+ uses the plugin folder name as the internal plugin ID and loads `__init__.py` directly from it. Moving `__init__.py` under a subdirectory would break the install. So `__init__.py` stays at the repo root, tests live in `tests/`, and the test harness imports the repo root as the package.
+
+**`BasePlugin` shim:** `pynicotine` isn't pip-installable — it's a desktop application, not a library. Importing `__init__.py` outside Nicotine+ fails with `ModuleNotFoundError: No module named 'pynicotine'`. `tests/conftest.py` works around this by inserting a fake `pynicotine.pluginsystem` module into `sys.modules` before the plugin is imported. The fake `BasePlugin` is a no-op stub with empty `__init__`, `log`, and `output` methods.
+
+**Testing model (what is tested where):**
+
+| Surface | How |
+|---|---|
+| Pure logic (DB queries, M3U regeneration, dedup, ordering, extension filter, data-dir discovery) | `pytest` against the real code with the `BasePlugin` shim |
+| Plugin lifecycle (settings populated correctly, `init()` runs, hooks bound) | Manual smoke test — toggle plugin in Nicotine+, watch chat log |
+| Live event delivery (`upload_finished_notification` actually fires) | Manual smoke test against a real Soulseek upload |
+| External player behavior on M3U rewrite (relevant in `by-album` mode) | Manual — open in target player, observe behavior |
+
+We deliberately don't try to integration-test against real Nicotine+ from CI. It would require a headless display, a real install, and a fake-event harness, all to validate the same things that are trivially observable with one manual toggle. Manual smoke is the right tool for the API-binding bugs; pytest is the right tool for the logic.
+
+**What we explicitly skip:** type checking (overkill at this size), coverage metrics (vanity at this size), `tox`/`nox` (single Python version targeted), pre-commit hooks (solo project — running `ruff format` manually before commits is fine). All easy to add later if scale or contributors change the calculus.
+
 ## Plugin lifecycle
 
 | Stage | What happens |
