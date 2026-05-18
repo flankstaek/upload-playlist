@@ -46,8 +46,15 @@ Common commands: `uv sync`, `uv run pytest`, `uv run ruff check`, `uv run ruff f
 
 | Surface | How |
 |---|---|
-| Pure logic (DB queries, M3U regeneration, dedup, ordering, extension filter, data-dir discovery) | `pytest` against the real code with the `BasePlugin` shim |
-| Plugin lifecycle (settings populated correctly, `init()` runs, hooks bound) | Manual smoke test — toggle plugin in Nicotine+, watch chat log |
+| DB schema creation + idempotency | `pytest` (`test_history_db.py`) |
+| `_record_upload` write-time dedup via `UNIQUE` index | `pytest` (`test_history_db.py`) |
+| `_regenerate_m3u` output: chronological order, NULL-ts ordering, extension filter, dedup on/off | `pytest` (`test_history_db.py`) |
+| `_import_uploads_json` idempotency, status filtering, `st_mtime`/NULL ts | `pytest` (`test_history_db.py`) |
+| `init()` lifecycle: four cases (DB × M3U existence matrix) | `pytest` (`test_init_lifecycle.py`) |
+| Live hook end-to-end: append to M3U, record in DB, dedup-on skip | `pytest` (`test_init_lifecycle.py`) |
+| Extension filter (`_is_playable`) | `pytest` (`test_extensions.py`) |
+| Cross-platform data-dir discovery | `pytest` (`test_data_dirs.py`) with mocked `sys.platform` |
+| Plugin loads inside Nicotine+, settings appear in UI | Manual smoke test |
 | Live event delivery (`upload_finished_notification` actually fires) | Manual smoke test against a real Soulseek upload |
 | External player behavior on M3U rewrite (relevant in `by-album` mode) | Manual — open in target player, observe behavior |
 
@@ -60,23 +67,60 @@ We deliberately don't try to integration-test against real Nicotine+ from CI. It
 | Stage | What happens |
 |---|---|
 | `__init__` | Defines `settings`, `metasettings`, `commands`. Settings values are NOT loaded yet. |
-| `init` | Resolves the playlist path. If file is brand-new or empty, opens it once to write `#EXTM3U` header + run auto-backfill, then closes. |
-| `upload_finished_notification` | Fires on every successful upload. If file extension is allowed, opens the playlist in append mode, writes the entry, closes. |
-| `disable` | Clears the stored playlist path. No file handle to release. |
+| `init` | Resolves the playlist path, ensures the history DB exists (`CREATE TABLE IF NOT EXISTS`), and decides whether to backfill or regenerate based on which files already exist (see "Init cases" below). |
+| `upload_finished_notification` | Fires on every successful upload. Records the event to the DB unconditionally; appends to the M3U only if the file extension is allowed and (when dedup is on) the file isn't already represented. |
+| `disable` | Clears the stored playlist path. No long-lived file or DB handles to release. |
+
+### Init cases
+
+| DB | M3U | Behavior |
+|---|---|---|
+| missing | missing | Create DB, run `uploads.json` backfill into DB, regenerate M3U. (Fresh install.) |
+| exists | exists | Use as-is. Don't touch the M3U — that's what `/playlist-reload` is for. |
+| exists | missing | Regenerate M3U from DB. (Playlist deleted, history intact.) |
+| missing | exists | Create empty DB. Don't back-parse the M3U — `#EXTINF` is lossy (no size, no structured timestamp). Pre-DB entries live only in the M3U; new events flow through both. |
 
 ## Settings
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
-| `playlist_path` | string | `~/soulseek_uploads.m3u8` | Where to write the playlist |
-| `audio_extensions` | list string | `mp3, flac, m4a, aac, ogg, opus, wav, aiff, aif, wma, ape, wv` | Extensions to include; everything else is filtered out |
+| `playlist_path` | string | `~/soulseek_uploads.m3u8` | Where to write the playlist. History DB is `<playlist_path>.history.db`. |
+| `audio_extensions` | list string | `mp3, flac, m4a, aac, ogg, opus, wav, aiff, aif, wma, ape, wv` | Extensions to include in the M3U projection; everything else is recorded in the DB but never written to the M3U |
+| `dedup` | bool | `false` | When on, the M3U lists each `real_path` at most once. DB still records every event. Run `/playlist-reload` after toggling. |
 
 ## Commands
 
 - `/playlist-path` — Prints the current playlist file path
-- `/playlist-backfill` — Re-runs backfill from Nicotine+'s `uploads.json(.old)` into the current playlist
+- `/playlist-backfill` — Re-imports Nicotine+'s `uploads.json(.old)` into the history DB (idempotent via `INSERT OR IGNORE`), then regenerates the M3U
+- `/playlist-reload` — Regenerates the M3U from the history DB. Use after changing `dedup` or recovering a deleted playlist file.
 
 ## Key design decisions
+
+### SQLite is the source of truth; M3U is a projection
+Every upload event lands in `uploads` (a single SQLite table) regardless of extension. The M3U is regenerated from a single `SELECT` whenever projection rules change (`dedup` toggled, `/playlist-reload`, recovery from a deleted M3U). The live hot path keeps the M3U append-only — DB insert plus one `#EXTINF` pair — so chronological mode stays cheap. Full regenerations write to `<playlist_path>.tmp` and use `os.replace` so external players never observe a partial file.
+
+We picked SQLite over a flat JSONL because the upcoming features (ordering, dedup, stats, per-user playlists) all map naturally to `ORDER BY`, `GROUP BY`, `UNIQUE` indexes, and indexed lookups. A flat file would force us to reimplement those by hand. `sqlite3` is stdlib so the runtime stays dependency-free.
+
+### Schema and write-time dedup
+```sql
+CREATE TABLE uploads (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT,         -- "YYYY-MM-DD HH:MM:SS", sortable as text; NULL for backfill rows where the file is gone
+    user         TEXT NOT NULL,
+    virtual_path TEXT NOT NULL,
+    real_path    TEXT NOT NULL,
+    size         INTEGER,
+    source       TEXT NOT NULL -- 'live' | 'backfill'
+);
+CREATE UNIQUE INDEX idx_uploads_dedup ON uploads(user, virtual_path, real_path);
+```
+The `UNIQUE` index gives write-time dedup for free — backfill becomes idempotent via `INSERT OR IGNORE`, no in-memory `seen` set, no per-row check before insert. Backfill timestamps come from `os.stat(real_path).st_mtime`; if the file is gone we record `NULL` and sort those rows first ("history first, then new captures").
+
+### Connection lifecycle: open-per-write
+No long-lived `sqlite3.Connection` on `self` — every live event does `connect → INSERT OR IGNORE → commit → close` (hundreds of microseconds, negligible at upload frequency). Backfill wraps all inserts in a single transaction (~100× faster than per-row commit). WAL mode (`PRAGMA journal_mode=WAL`) so future stats queries don't block live inserts. Mirrors the same open-per-write rationale the M3U already uses.
+
+### Dedup is a projection setting, not an event filter
+With `dedup` on, the DB still records every event; only the M3U collapses. The live hook checks `SELECT 1 FROM uploads WHERE real_path = ?` before appending and skips the append on a hit. Toggling `dedup` is therefore a regen-only operation (`/playlist-reload`) — no data is lost when going from on to off. The M3U entry that survives a dedup collapse uses the **first** upload's metadata (`MIN(id)` per `real_path`), so once a track is in the playlist it stays in its original position rather than bubbling to the bottom on re-shares; external players see stable line ordering in chronological mode.
 
 ### Append mode, not overwrite
 The playlist is opened with `"a"` and the `#EXTM3U` header is only written when the file is new or empty. This means the playlist persists across plugin reloads and Nicotine+ restarts. Earlier iterations used `"w"` (truncate), which wiped the log on every reload.

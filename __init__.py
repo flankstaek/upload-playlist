@@ -1,6 +1,8 @@
 import json
 import os
+import sqlite3
 import sys
+from contextlib import closing
 from datetime import datetime
 
 from pynicotine.pluginsystem import BasePlugin
@@ -26,6 +28,7 @@ class Plugin(BasePlugin):
                 "ape",
                 "wv",
             ],
+            "dedup": False,
         }
         self.metasettings = {
             "playlist_path": {
@@ -35,6 +38,13 @@ class Plugin(BasePlugin):
             "audio_extensions": {
                 "description": "File extensions (without dot) to include in the playlist",
                 "type": "list string",
+            },
+            "dedup": {
+                "description": (
+                    "Collapse repeated uploads of the same file into a single playlist entry. "
+                    "Run /playlist-reload after toggling."
+                ),
+                "type": "bool",
             },
         }
 
@@ -47,36 +57,70 @@ class Plugin(BasePlugin):
                 "description": "Import historical uploads from Nicotine+'s uploads.json",
                 "callback": self.cmd_backfill,
             },
+            "playlist-reload": {
+                "description": "Regenerate the playlist from the history database",
+                "callback": self.cmd_reload,
+            },
         }
 
         self._playlist_path = None
 
+    @property
+    def _history_db_path(self):
+        if not self._playlist_path:
+            return None
+        return self._playlist_path + ".history.db"
+
     def init(self):
         self._playlist_path = os.path.expanduser(self.settings["playlist_path"])
-        is_new = (
-            not os.path.exists(self._playlist_path) or os.path.getsize(self._playlist_path) == 0
+        db_existed = os.path.exists(self._history_db_path)
+        m3u_existed = (
+            os.path.exists(self._playlist_path) and os.path.getsize(self._playlist_path) > 0
         )
 
-        if is_new:
-            with open(self._playlist_path, "a", encoding="utf-8") as f:
-                f.write("#EXTM3U\n")
-                count = self._write_backfill(f)
+        self._db_init()
+
+        if not db_existed and not m3u_existed:
+            count = self._import_uploads_json()
+            self._regenerate_m3u()
             if count:
                 self.log(f"Auto-backfill imported {count} historical uploads.")
+        elif db_existed and not m3u_existed:
+            self._regenerate_m3u()
+            self.log("Regenerated playlist from history database.")
 
         self.log(f"Upload playlist ready at: {self._playlist_path}")
 
     def upload_finished_notification(self, user, virtual_path, real_path):
         if not self._playlist_path:
             return
-        if not self._is_playable(real_path):
+
+        size = None
+        try:
+            size = os.path.getsize(real_path)
+        except OSError:
+            pass
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        playable = self._is_playable(real_path)
+        dedup_on = bool(self.settings.get("dedup"))
+
+        already_present = False
+        with closing(self._db_connect()) as conn:
+            if playable and dedup_on:
+                cur = conn.execute(
+                    "SELECT 1 FROM uploads WHERE real_path = ? LIMIT 1", (real_path,)
+                )
+                already_present = cur.fetchone() is not None
+            self._record_upload(user, virtual_path, real_path, size, "live", ts, conn)
+            conn.commit()
+
+        if not playable or already_present:
             return
 
         display_name = os.path.basename(real_path)
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
         with open(self._playlist_path, "a", encoding="utf-8") as f:
-            f.write(f"#EXTINF:-1,{display_name} [uploaded to {user} at {timestamp}]\n")
+            f.write(f"#EXTINF:-1,{display_name} [uploaded to {user} at {ts}]\n")
             f.write(f"{real_path}\n")
 
         self.log(f"Added to playlist: {display_name} (downloaded by {user})")
@@ -91,19 +135,93 @@ class Plugin(BasePlugin):
     def cmd_backfill(self, args, **kwargs):
         if not self._playlist_path:
             return True
-        with open(self._playlist_path, "a", encoding="utf-8") as f:
-            count = self._write_backfill(f)
-        self.output(f"Backfill imported {count} historical uploads.")
+        count = self._import_uploads_json()
+        self._regenerate_m3u()
+        self.output(f"Backfill imported {count} new entries to history; playlist regenerated.")
         return True
 
-    def _write_backfill(self, file):
+    def cmd_reload(self, args, **kwargs):
+        if not self._playlist_path:
+            return True
+        self._regenerate_m3u()
+        self.output("Playlist regenerated from history.")
+        return True
+
+    def _db_connect(self):
+        conn = sqlite3.connect(self._history_db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    def _db_init(self):
+        with closing(self._db_connect()) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS uploads (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts           TEXT,
+                    user         TEXT NOT NULL,
+                    virtual_path TEXT NOT NULL,
+                    real_path    TEXT NOT NULL,
+                    size         INTEGER,
+                    source       TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_uploads_ts ON uploads(ts);
+                CREATE INDEX IF NOT EXISTS idx_uploads_realpath ON uploads(real_path);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_uploads_dedup
+                    ON uploads(user, virtual_path, real_path);
+                PRAGMA user_version = 1;
+                """
+            )
+            conn.commit()
+
+    def _record_upload(self, user, virtual_path, real_path, size, source, ts, conn):
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO uploads (ts, user, virtual_path, real_path, size, source) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (ts, user, virtual_path, real_path, size, source),
+        )
+        return cur.rowcount
+
+    def _select_for_ordering(self, conn):
+        if self.settings.get("dedup"):
+            return conn.execute(
+                """
+                SELECT u.ts, u.user, u.real_path
+                FROM uploads u
+                WHERE u.id = (
+                    SELECT MIN(id) FROM uploads WHERE real_path = u.real_path
+                )
+                ORDER BY u.ts IS NULL DESC, u.ts ASC, u.id ASC
+                """
+            )
+        return conn.execute(
+            """
+            SELECT ts, user, real_path
+            FROM uploads
+            ORDER BY ts IS NULL DESC, ts ASC, id ASC
+            """
+        )
+
+    def _regenerate_m3u(self):
+        tmp_path = self._playlist_path + ".tmp"
+        with closing(self._db_connect()) as conn, open(tmp_path, "w", encoding="utf-8") as f:
+            f.write("#EXTM3U\n")
+            for ts, user, real_path in self._select_for_ordering(conn):
+                if not self._is_playable(real_path):
+                    continue
+                display_name = os.path.basename(real_path)
+                suffix = f"[uploaded to {user} at {ts}]" if ts else f"[uploaded to {user}]"
+                f.write(f"#EXTINF:-1,{display_name} {suffix}\n")
+                f.write(f"{real_path}\n")
+        os.replace(tmp_path, self._playlist_path)
+
+    def _import_uploads_json(self):
         sources = self._find_uploads_sources()
         if not sources:
             self.log("Backfill: no uploads history file found.")
             return 0
 
-        seen = set()
-        merged = []
+        deduped_rows = {}
         for source in sources:
             try:
                 with open(source, encoding="utf-8") as f:
@@ -114,26 +232,31 @@ class Plugin(BasePlugin):
             for row in rows:
                 if len(row) < 4 or row[3] != "Finished":
                     continue
-                key = (row[0], row[1], row[2])
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged.append(row)
+                user, virtual_path, real_dir = row[0], row[1], row[2]
+                deduped_rows.setdefault((user, virtual_path, real_dir), None)
 
-        count = 0
-        for row in merged:
-            user, virtual_path, real_dir = row[0], row[1], row[2]
-            filename = virtual_path.replace("/", "\\").split("\\")[-1]
-            if not self._is_playable(filename):
-                continue
-            real_path = os.path.join(real_dir, filename)
+        if not deduped_rows:
+            return 0
 
-            file.write(f"#EXTINF:-1,{filename} [uploaded to {user}] [backfilled]\n")
-            file.write(f"{real_path}\n")
-            count += 1
+        inserted = 0
+        with closing(self._db_connect()) as conn:
+            for user, virtual_path, real_dir in deduped_rows:
+                filename = virtual_path.replace("/", "\\").split("\\")[-1]
+                real_path = os.path.join(real_dir, filename)
+                try:
+                    st = os.stat(real_path)
+                    ts = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                    size = st.st_size
+                except OSError:
+                    ts = None
+                    size = None
+                inserted += self._record_upload(
+                    user, virtual_path, real_path, size, "backfill", ts, conn
+                )
+            conn.commit()
 
-        self.log(f"Backfill: imported {count} entries from {len(sources)} source file(s)")
-        return count
+        self.log(f"Backfill: imported {inserted} new entries from {len(sources)} source file(s)")
+        return inserted
 
     def _is_playable(self, path):
         ext = os.path.splitext(path)[1].lstrip(".").lower()

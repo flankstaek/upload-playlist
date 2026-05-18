@@ -11,19 +11,23 @@ A [Nicotine+](https://nicotine-plus.github.io/) plugin that writes a live M3U pl
 
 - Captures every successful upload via `upload_finished_notification`
 - Configurable audio extension filter (skips cover art, logs, cue sheets, ZIPs, etc.)
-- Playlist persists across Nicotine+ restarts (append mode)
+- Owns its history in a small SQLite DB next to the playlist (`<playlist>.history.db`) — the M3U is a regeneratable projection
+- Optional dedup mode collapses repeated uploads of the same file to a single playlist entry
+- Playlist persists across Nicotine+ restarts (append mode for the hot path; atomic temp-file swap on full regenerations)
 - External players can read the playlist while Nicotine+ is running (open-per-write, no long-lived file handle)
 - One-time backfill from Nicotine+'s `uploads.json` on first install — auto-runs when playlist is new, or re-triggerable via `/playlist-backfill`
 
 ## Commands
 
 - `/playlist-path` — print the current playlist file path
-- `/playlist-backfill` — import historical uploads from Nicotine+'s `uploads.json`
+- `/playlist-backfill` — import historical uploads from Nicotine+'s `uploads.json` into the history DB and regenerate the playlist
+- `/playlist-reload` — regenerate the playlist from the history DB (use after toggling settings like `dedup`)
 
 ## Settings
 
-- `playlist_path` — where to write the playlist (default: `~/soulseek_uploads.m3u8`; `.m3u8` signals UTF-8 so non-ASCII paths resolve correctly)
+- `playlist_path` — where to write the playlist (default: `~/soulseek_uploads.m3u8`; `.m3u8` signals UTF-8 so non-ASCII paths resolve correctly). The history DB lives at `<playlist_path>.history.db`.
 - `audio_extensions` — which file types to include (default: mp3, flac, m4a, aac, ogg, opus, wav, aiff, aif, wma, ape, wv)
+- `dedup` — collapse repeated uploads of the same file into a single playlist entry (default: off). The DB still records every event. Run `/playlist-reload` after toggling.
 
 ## Install
 

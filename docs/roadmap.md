@@ -6,7 +6,7 @@ Iterative plan. Ordered roughly by priority and dependency — earlier items unb
 
 Confirmed firing on real uploads — entries land in the M3U and play in external players.
 
-## Now: dev tooling + test harness
+## Done: dev tooling + test harness
 
 **Why:** the SQLite work that follows is the first non-trivial logic change to the plugin. Up to now we've shipped on manual smoke tests (toggle plugin in Nicotine+, watch chat log). That worked when the whole plugin was ~30 lines of "open file, append two strings"; it scales badly once we have a DB schema, a regeneration path, ordering modes, and dedup. We want a fast feedback loop *before* we start writing that code, not after.
 
@@ -51,7 +51,7 @@ Skipping for now: type checking (overkill at this size), coverage tools (vanity 
 
 Once this lands the SQLite work below can land alongside its tests in the same PR, instead of as a one-shot manual-smoke-tested change.
 
-## Next: own our history (SQLite store)
+## Done: own our history (SQLite store)
 
 **Why:** `uploads.json(.old)` is rolling state, not a log. Nicotine+ overwrites it on rotation and historical data is lost. To support real dedup, stats, re-exports, or richer playlists, the plugin needs to own its own store.
 
@@ -107,24 +107,26 @@ The `UNIQUE` index gives write-time dedup for free — re-running backfill becom
 **Backfill timestamps:** `uploads.json` rows don't carry timestamps. Use `os.stat(real_path).st_mtime` if file exists; sentinel/NULL if not. NULLs sort first in chronological view → backfill entries appear at top of playlist (intuitive: history first, then new captures).
 
 **Tasks:**
-- [ ] Add `_history_db_path` property and `_db_connect`/`_db_init` helpers
-- [ ] Wire `_db_init()` into `init()` lifecycle
-- [ ] Add `_record_upload()` and call from `upload_finished_notification` (in addition to existing M3U append)
-- [ ] Refactor `_write_backfill()` to write to DB inside one transaction, then call `_regenerate_m3u()` once at end
-- [ ] Implement `_regenerate_m3u()` with temp-file + `os.replace`
-- [ ] Add `/playlist-reload` command that calls `_regenerate_m3u()`
+- [x] Add `_history_db_path` property and `_db_connect`/`_db_init` helpers
+- [x] Wire `_db_init()` into `init()` lifecycle
+- [x] Add `_record_upload()` and call from `upload_finished_notification` (in addition to existing M3U append)
+- [x] Refactor `_write_backfill()` to write to DB inside one transaction, then call `_regenerate_m3u()` once at end
+- [x] Implement `_regenerate_m3u()` with temp-file + `os.replace`
+- [x] Add `/playlist-reload` command that calls `_regenerate_m3u()`
 
-Once this lands, all subsequent features operate against the owned DB rather than Nicotine+'s rolling state.
+All subsequent features operate against the owned DB rather than Nicotine+'s rolling state.
 
-## Then: dedup
+## Done: dedup (shipped alongside SQLite store)
 
-**Why:** repeat uploads of the same file (by the same or different users) currently stack up in the M3U. User wants a clean playlist without duplicate entries.
+**Framing:** the playlist is mostly novelty — an honest log of what got shared. Dedup is opt-in noise reduction for when one album or track gets downloaded repeatedly and drowns out everything else. So it's a setting (`dedup: bool`, default `false`), not the default behavior, and not a one-off command (a command would drift the moment the next upload event arrives).
 
-With SQLite in place this is mostly a presentation question — the DB is already deduped at the `(user, virtual_path, real_path)` level via `UNIQUE`. M3U dedup is a `SELECT DISTINCT` (or `GROUP BY real_path`) on regeneration.
+**Decisions:**
+- **Dedup key: `real_path` alone.** "Unique tracks" is the natural meaning for a listening playlist. `(real_path, user)` would still show a track twice when two people grabbed it, which isn't really dedup from a listener standpoint.
+- **Position: MIN(ts) / first occurrence.** Tracks stay in their original playlist position; re-shares don't bubble to the bottom. Matches the append-only feel of chronological mode and keeps external-player line indices stable.
+- **`#EXTINF` display: first occurrence's metadata.** With MIN(id) selection, the surviving entry keeps the original `[uploaded to <first user> at <first ts>]`. No "shared 3x" formatting needed; no rewrite to entries already in the file.
+- **DB still records every event** when dedup is on — only the M3U projection collapses. Toggling dedup off and reloading restores the full view.
 
-Open design questions:
-- Dedup key for the M3U view: `real_path` alone (one entry per file, regardless of who downloaded it) vs `(real_path, user)` (one entry per file per downloader). The DB keeps full granularity either way; this is just the projection.
-- Does the user want the most-recent upload of a file to "bubble up" in the playlist, or stay in its original position? `MAX(ts)` vs `MIN(ts)` in the `ORDER BY`.
+**Implementation:** ~10 lines on top of the SQLite work — one setting, a `SELECT 1 WHERE real_path = ?` check in the live hook, and a `WHERE u.id = (SELECT MIN(id) ...)` branch in `_select_for_ordering`.
 
 ## Then: album ordering
 
