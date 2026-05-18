@@ -128,11 +128,11 @@ The playlist is opened with `"a"` and the `#EXTM3U` header is only written when 
 ### Open-per-write, no long-lived file handle
 We don't hold the playlist file open between writes. Each upload opens it in append mode, writes two lines, and closes. On Windows this matters because holding a file handle open can block other readers (e.g. a media player trying to load the playlist while Nicotine+ is running). The open/close overhead is negligible at upload frequency. An earlier iteration kept the handle open for the plugin's whole lifetime — it worked, but made the playlist effectively unreadable in external players until the plugin was disabled.
 
-### Filter by file extension
-Soulseek users download whole album folders — including cover art, logs, cue sheets, .nfo files, ZIPs, etc. An M3U should only list playable media, so both the live hook and the backfill gate writes through `_is_playable(path)`, which checks the extension against the configurable `audio_extensions` set.
+### Filter by file extension at projection, not ingest
+Soulseek users download whole album folders — including cover art, logs, cue sheets, .nfo files, ZIPs, etc. An M3U should only list playable media. The DB records *every* upload event regardless of extension (we want full history for future stats); `_is_playable(path)` gates the M3U write in both the live hot path and `_regenerate_m3u`'s `SELECT` loop. If `audio_extensions` changes later, the next regen reflects it without any data loss in the DB.
 
 ### Backfill merges all history sources
-`_find_uploads_sources()` returns *every* existing history file (not just the largest). `_write_backfill()` reads each, deduplicates rows on the `(user, virtual_path, real_dir)` tuple, then writes the merged set. This handles the case where `uploads.json` has current-session data and `uploads.json.old` has the previous session's — both can contribute.
+`_find_uploads_sources()` returns *every* existing history file (not just the largest). `_import_uploads_json()` reads each, deduplicates rows on the `(user, virtual_path, real_dir)` tuple, then inserts the merged set into the DB inside a single transaction. This handles the case where `uploads.json` has current-session data and `uploads.json.old` has the previous session's — both can contribute. Re-running the backfill is idempotent via `INSERT OR IGNORE` against the `(user, virtual_path, real_path)` UNIQUE index.
 
 ### `.m3u8` extension for UTF-8 path encoding
 The default playlist extension is `.m3u8`, not `.m3u`. Python always writes the file as UTF-8, but by informal convention `.m3u` is interpreted by players as the system's local codepage (cp1252 on Windows), while `.m3u8` is explicitly UTF-8. Paths containing non-ASCII characters (em dashes, middle dots, accented letters, etc.) round-trip correctly only under the `.m3u8` convention; under `.m3u` the player decodes UTF-8 bytes as cp1252 and looks for a file that doesn't exist on disk. We hit this in practice with a folder containing U+200E, U+00B7, and U+2014 — ASCII-only tracks in the same playlist played fine, non-ASCII ones silently failed.
@@ -152,8 +152,8 @@ Nicotine+'s `uploads.json` is **data**, not config, so it lives under `XDG_DATA_
 
 We don't ask the running Nicotine+ for its own data path via `self.config`, even though that'd be more authoritative. The `self.config` API surface isn't documented in our reference, so we rely on platform conventions instead. If discovery breaks on someone's system, introspecting `self.config` is the fallback to investigate.
 
-### Auto-backfill only when playlist is new
-`init()` runs backfill automatically only when the playlist file is missing or zero-bytes. This makes first-time enable "just work" without cluttering reloads. Manual `/playlist-backfill` remains available for re-triggering.
+### Auto-backfill only on a truly fresh install
+`init()` runs `uploads.json` backfill automatically only when *both* the history DB and the M3U are absent — the "fresh install" branch of the init-cases matrix above. Reloading the plugin after history exists is a no-op; deleting just the M3U regenerates from the DB rather than re-pulling from `uploads.json`. Manual `/playlist-backfill` remains available for re-triggering.
 
 ## Lessons learned
 

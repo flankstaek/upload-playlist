@@ -59,19 +59,19 @@ Once this lands the SQLite work below can land alongside its tests in the same P
 
 **Storage location:** `<playlist_path>.history.db` — derived from existing `playlist_path` setting, no new setting needed. Moving the playlist moves the history.
 
-**Schema (v1):**
+**Schema (v1, as shipped):**
 ```sql
 CREATE TABLE uploads (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts           TEXT NOT NULL,        -- ISO-8601, sortable as text
+    ts           TEXT,                 -- "YYYY-MM-DD HH:MM:SS"; NULL for backfill rows where file is gone
     user         TEXT NOT NULL,
     virtual_path TEXT NOT NULL,        -- backslash-separated, Soulseek-side
     real_path    TEXT NOT NULL,        -- local filesystem path
     size         INTEGER,              -- bytes; NULL if file gone at backfill time
     source       TEXT NOT NULL         -- 'live' | 'backfill'
 );
-CREATE INDEX idx_uploads_ts       ON uploads(ts);
-CREATE INDEX idx_uploads_realdir  ON uploads(real_path);
+CREATE INDEX idx_uploads_ts        ON uploads(ts);
+CREATE INDEX idx_uploads_realpath  ON uploads(real_path);
 CREATE UNIQUE INDEX idx_uploads_dedup
     ON uploads(user, virtual_path, real_path);
 PRAGMA user_version = 1;
@@ -87,20 +87,21 @@ The `UNIQUE` index gives write-time dedup for free — re-running backfill becom
 - Mode-changing operations (ordering setting changed, dedup toggled, `/playlist-reload`) regenerate the entire M3U from a single `SELECT … ORDER BY …`.
 - Regenerations use **temp-file + `os.replace`** for atomic swap so external players never see a partial M3U.
 
-**Helpers to add (all small):**
-- `_history_db_path` — property derived from `playlist_path`
-- `_db_connect()` — opens connection, sets WAL pragma
+**Helpers (as shipped):**
+- `_history_db_path` — property derived from `playlist_path` (`<playlist_path>.history.db`)
+- `_db_connect()` — opens connection, sets WAL pragma; wrapped at call sites with `contextlib.closing`
 - `_db_init()` — `CREATE TABLE IF NOT EXISTS …`, idempotent, called from `init()`
-- `_record_upload(user, vpath, rpath, size, source)` — single `INSERT OR IGNORE`, used by both live hook and backfill
+- `_record_upload(user, virtual_path, real_path, size, source, ts, conn)` — single `INSERT OR IGNORE` against a caller-owned connection; used by both live hook (with its own short-lived conn) and backfill (sharing one transaction)
 - `_regenerate_m3u()` — writes to `<playlist_path>.tmp`, then `os.replace`. Used by mode changes and `/playlist-reload`.
-- `_select_for_ordering(conn, mode)` — encapsulates mode→SQL mapping
+- `_select_for_ordering(conn)` — reads `dedup` from settings and returns the appropriate SQL cursor (will grow an ordering branch when album mode lands)
 
-**Init / migration cases:**
+**Init / migration cases (as shipped — see `docs/architecture.md#init-cases` for the canonical table):**
 
 | Case | Behavior |
 |---|---|
-| DB exists | Use it. Don't touch M3U unless explicitly reloaded. |
 | DB missing, M3U missing | Create DB, run `uploads.json` backfill into DB, then `_regenerate_m3u()`. |
+| DB exists, M3U exists | Use as-is. Don't touch M3U unless `/playlist-reload`. |
+| DB exists, M3U missing | Regenerate M3U from DB (playlist deleted, history intact). |
 | DB missing, M3U exists | Existing user upgrading. Create empty DB. **Don't** parse M3U back — `#EXTINF` is lossy (no size, no structured timestamp). Old entries live only in M3U; new ones flow through both. |
 | DB schema older than code | `PRAGMA user_version` check + migration. Out of scope for v1, hook is in place. |
 
@@ -168,10 +169,9 @@ Depends on: persistent history (so we can regenerate).
 ## Then: more commands
 
 Candidates, in no particular order:
-- `/playlist-clear` — empty the playlist and the underlying history log (with confirmation prompt)
+- `/playlist-clear` — empty the playlist and the underlying history DB (with confirmation prompt)
 - `/playlist-stats` — counts by user, by file type, by album
 - `/playlist-open` — launch the playlist in the default player (platform-dependent)
-- `/playlist-reload` — re-generate M3U from the history log (useful after changing ordering/dedup settings)
 
 ## Later: nice-to-haves
 
