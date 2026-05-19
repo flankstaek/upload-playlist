@@ -2,6 +2,26 @@
 
 Iterative plan. Ordered roughly by priority and dependency — earlier items unblock later ones.
 
+## Bugs
+
+### `_regenerate_m3u` crashes on Windows when an external player has the M3U open
+
+**Symptom:** `PermissionError: [WinError 5] Access is denied: '<playlist>.tmp' -> '<playlist>'` raised from `os.replace(tmp_path, self._playlist_path)`. Reproduced on Windows with the Zed editor holding the M3U open while running `/playlist-backfill`. The DB write that preceded the regen succeeded; only the projection swap failed, leaving a stale M3U and a stray `.tmp` file on disk.
+
+**Affected paths:** any caller of `_regenerate_m3u()` — `/playlist-backfill`, `/playlist-reload`, and every live `upload_finished_notification` in `by-album` mode.
+
+**Why it happens:** Windows refuses to rename over a file that another process has opened without `FILE_SHARE_DELETE`. Editors (Zed reproduced; VS Code, Notepad++ etc. likely the same class) hold the handle for the duration the file is open in a buffer. Media players that read-and-release on load — Windows Media Player verified, VLC likely similar — do *not* trigger this, and regen swaps complete cleanly even with the M3U actively playing (WMP kept the current track playing uninterrupted through a `/playlist-reload`). So the realistic trigger surface is editors and any player that holds the handle for the lifetime of playback, not all external readers.
+
+**Architectural context:** `architecture.md` already flagged external-player behavior on by-album rewrites as a manual-test concern, but anticipated *player misbehavior* (stale playback, audible glitches), not *plugin crash*. This bug is strictly worse than the documented risk and predates by-album mode — it would affect any regen call.
+
+**Options (not yet decided):**
+1. **Document only.** Tell users to close their player before running reload/backfill, accept the crash in by-album mode. Cheapest, but `/playlist-backfill` on a fresh install can race with a player that auto-loads the M3U.
+2. **Catch + retry with backoff.** Wrap `os.replace` in a short retry loop (e.g. 3 tries, 100ms each). Helps with transient locks but doesn't help a player that holds the handle for the duration of playback.
+3. **Fall back to truncate-and-rewrite on `PermissionError`.** Loses atomicity (external reader can see a partial file) but makes the regen succeed. Acceptable for `/playlist-backfill` and `/playlist-reload` (explicit user actions); risky for by-album live regen.
+4. **Hybrid.** Try `os.replace`; on `PermissionError`, log a warning and fall back to in-place write. Cleanup of any leftover `.tmp` on next successful regen.
+
+**Immediate workaround:** close the player, re-run the failed command. Manually delete any stray `<playlist>.tmp` file.
+
 ## Done: verify the live hook
 
 Confirmed firing on real uploads — entries land in the M3U and play in external players.
@@ -144,7 +164,34 @@ All subsequent features operate against the owned DB rather than Nicotine+'s rol
 
 A *buffering / deferred-flush* approach (only flush a folder once we "knew" the album was complete) was rejected because: Soulseek has no "album complete" event so any heuristic has real failure modes (last album of session never flushes; concurrent downloads thrash; needs a `threading.Timer` lifecycle); late arrivals fragment albums regardless of buffering; full regen + `os.replace` solves the only real concern (truncated reads by external players) in one line of code.
 
-**Still owed — manual smoke test against the target player:** open the regenerated M3U in the actual target player (VLC, foobar2000, etc.), start playback, trigger an upload event mid-playback, and confirm the player either continues on the same file or handles the reload gracefully. If the rewrite causes audible disruption, the fallback is **debounced regen** — coalesce bursts of upload events into a single rewrite N seconds after the last event (still `os.replace`, just batches the writes). Bounded scope, a write-coalescer not a correctness mechanism.
+**Manual smoke test against external player — done:** Windows Media Player kept playing the current track uninterrupted through a `/playlist-reload` regen with the M3U loaded. No audible disruption, no `os.replace` failure (WMP doesn't hold the file handle the way editors do — see the Bugs section above). Debounced-regen fallback not needed for WMP; reassess if a different target player misbehaves.
+
+## Next: chronological ordering with album grouping
+
+**Why:** current `by-album` mode sorts folders alphabetically by full path, which makes the playlist a static catalog and throws away the recency signal that's the whole point of an upload log. Plain `chronological` mode preserves recency but scatters an album across whatever else was uploaded in between. The interesting middle ground: chronological as the primary sort, but group all tracks from the same folder together so an album plays cohesively when you hit one of its tracks.
+
+**Behavior:** introduce a third option in the existing `ordering` dropdown — e.g. `by-album-chronological` — alongside `chronological` and `by-album`. Folders are ordered by their first appearance in the upload history; within a folder, tracks sort by filename (same as `by-album` today).
+
+**Why `MIN(ts)` for the album timestamp, not `MAX(ts)`:**
+- Stable position: once an album lands in the playlist it stays where it is, even if someone redownloads a different track from it months later.
+- Matches existing dedup semantics (`MIN(id) per real_path` is the surviving row on dedup collapse — "first sight wins").
+- `MAX(ts)` would make albums bubble up on every re-download. That's a useful "recent activity" *view*, but it's a different feature; reordering on every event is confusing in a log.
+
+**Implementation sketch:**
+- SQLite doesn't have a stdlib `dirname` function, so derive the folder by stripping the trailing filename via `substr` + `instr` on the path separator. Soulseek paths use `\` regardless of OS (architecture.md), but `real_path` is the local filesystem path so the separator is OS-dependent. Cleaner option: store `real_dir` as a separate column on insert, indexed; one schema migration.
+- Sort SQL becomes roughly:
+  ```sql
+  WITH album_ts AS (
+    SELECT real_dir, MIN(ts) AS first_ts FROM uploads GROUP BY real_dir
+  )
+  SELECT u.ts, u.user, u.real_path
+  FROM uploads u JOIN album_ts a USING (real_dir)
+  ORDER BY a.first_ts IS NULL DESC, a.first_ts ASC, u.real_path ASC, u.id ASC
+  ```
+  (NULL-ts backfill rows: their album's `MIN(ts)` is NULL → sorts first, consistent with chronological mode.)
+- Live hook in this mode still calls `_regenerate_m3u()` on every event (full regen, same as `by-album` today) — a new album means a new group has to slot in by its `MIN(ts)`, and a new track for an existing album lands inside that group rather than at the bottom. The Windows `os.replace` bug above applies equally here.
+
+**Open question:** should this become the new default for `ordering`, demoting plain `by-album` to a niche option? Leaning yes — alphabetical-only is rarely what someone wants from an upload log. Decide when implementing.
 
 ## Then: more commands
 
