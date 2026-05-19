@@ -129,42 +129,22 @@ All subsequent features operate against the owned DB rather than Nicotine+'s rol
 
 **Implementation:** ~10 lines on top of the SQLite work — one setting, a `SELECT 1 WHERE real_path = ?` check in the live hook, and a `WHERE u.id = (SELECT MIN(id) ...)` branch in `_select_for_ordering`.
 
-## Then: album ordering
+## Done: album ordering
 
-**Why:** M3U entries currently land in upload chronological order. User wants tracks grouped by album so the playlist plays as cohesive listens.
+**Why:** M3U entries land in upload chronological order by default; user wants the option to group tracks by album so the playlist plays as cohesive listens.
 
-**New setting:**
-```python
-"ordering": {
-    "description": "How to order playlist entries",
-    "type": "dropdown",
-    "options": ["chronological", "by-album"],
-}
-```
-Default `"chronological"` to preserve existing behavior.
+**Shipped:**
+- New `ordering` dropdown setting, options `chronological` (default, preserves existing behavior) and `by-album`.
+- `chronological` → `ORDER BY ts IS NULL DESC, ts ASC, id ASC` (NULL-ts backfill rows first).
+- `by-album` → `ORDER BY real_path ASC, id ASC`. Because `real_path` includes the filename, one clause both groups by directory and sorts within by filename — works for properly-named rips with zero deps.
+- Live hook branches on ordering: chronological still appends one `#EXTINF` pair (fast path); by-album calls `_regenerate_m3u()` (temp-file + `os.replace`) so new tracks land in the right folder group instead of at the end.
+- Setting change → run `/playlist-reload`.
 
-**Implementation:**
-- `chronological` → `ORDER BY ts ASC` (NULLs first, so backfill entries lead)
-- `by-album` → `ORDER BY real_path` (groups same-folder files naturally), within group filename order (which usually embeds track number)
-- Setting change → `_regenerate_m3u()`
+**Tradeoffs considered (decided against, documented in architecture.md):**
 
-**Within-album sort:** start with filename order. It works for properly-named rips and adds zero dependencies. Only revisit metadata-tag parsing if filename order produces visibly wrong results in real use.
+A *buffering / deferred-flush* approach (only flush a folder once we "knew" the album was complete) was rejected because: Soulseek has no "album complete" event so any heuristic has real failure modes (last album of session never flushes; concurrent downloads thrash; needs a `threading.Timer` lifecycle); late arrivals fragment albums regardless of buffering; full regen + `os.replace` solves the only real concern (truncated reads by external players) in one line of code.
 
-**Live writes in `by-album` mode:** full M3U regen on every event via temp-file + `os.replace`. At realistic scale this is microseconds of work. Append-only optimization stays for chronological mode (where regen and append produce identical output).
-
-**Tradeoffs considered (decided against, but documented):**
-
-We considered a *buffering / deferred-flush* approach where in `by-album` mode the live hook would only write to the DB, and the M3U would be appended in album-grouped chunks once we "knew" an album was complete. We decided against it because:
-
-- **There is no "album complete" event from Soulseek.** Any flush trigger has to be inferred (different album appears, idle timeout, file-count heuristic), and every inference has a real failure mode (last album of session never flushes; concurrent downloads thrash; slow-link gaps false-trigger; needs a `threading.Timer` lifecycle inside the plugin).
-- **Late arrivals fragment albums anyway.** Once an album block is appended, a track for that album arriving an hour later either appends as a duplicate album block (defeats the feature) or forces an insert (= full regen by another name). Append-only and "tracks grouped by album" are fundamentally in tension when late arrivals are guaranteed.
-- **Full regen + `os.replace` solves the only real concern (truncated reads by external players) cleanly** in ~one line of code.
-
-The one remaining concern with full regen is **player playback-position tracking** — players that key "currently playing" by line index could jump on reorder. Most modern players re-resolve by path and tolerate this fine, but it's untested in our setup.
-
-**Test before shipping by-album mode:** open the regenerated M3U in the actual target player (VLC, foobar2000, whatever the user uses), start playback, trigger an upload event mid-playback, and confirm the player either continues on the same file or handles the reload gracefully. If it causes audible disruption, the fallback is **debounced regen** — coalesce bursts of upload events into a single rewrite N seconds after the last event (still uses `os.replace`, just batches the writes). This is a write-coalescer, not a correctness mechanism, so its scope is bounded even with the `threading.Timer` complexity.
-
-Depends on: persistent history (so we can regenerate).
+**Still owed — manual smoke test against the target player:** open the regenerated M3U in the actual target player (VLC, foobar2000, etc.), start playback, trigger an upload event mid-playback, and confirm the player either continues on the same file or handles the reload gracefully. If the rewrite causes audible disruption, the fallback is **debounced regen** — coalesce bursts of upload events into a single rewrite N seconds after the last event (still `os.replace`, just batches the writes). Bounded scope, a write-coalescer not a correctness mechanism.
 
 ## Then: more commands
 

@@ -165,6 +165,36 @@ def test_upload_finished_dedup_on_skips_second_append(make_plugin, tmp_path):
     assert count == 2  # both events still recorded in DB
 
 
+def test_upload_finished_by_album_regenerates_and_groups(make_plugin, tmp_path):
+    p = make_plugin()
+    p.settings["ordering"] = "by-album"
+    p.init()
+
+    album_a = tmp_path / "AlbumA"
+    album_b = tmp_path / "AlbumB"
+    album_a.mkdir()
+    album_b.mkdir()
+
+    # Upload out of album order; the M3U should group by folder after each event.
+    p.upload_finished_notification("alice", "v\\b1.mp3", str(album_b / "01.mp3"))
+    p.upload_finished_notification("alice", "v\\a1.mp3", str(album_a / "01.mp3"))
+    p.upload_finished_notification("alice", "v\\b2.mp3", str(album_b / "02.mp3"))
+    p.upload_finished_notification("alice", "v\\a2.mp3", str(album_a / "02.mp3"))
+
+    with open(p._playlist_path, encoding="utf-8") as f:
+        content = f.read()
+    order = [
+        content.index(str(path))
+        for path in (
+            album_a / "01.mp3",
+            album_a / "02.mp3",
+            album_b / "01.mp3",
+            album_b / "02.mp3",
+        )
+    ]
+    assert order == sorted(order)
+
+
 def test_cmd_reload_regenerates_from_db(make_plugin, tmp_path):
     p = make_plugin()
     p.init()

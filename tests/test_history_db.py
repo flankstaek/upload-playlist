@@ -122,6 +122,43 @@ def test_regenerate_m3u_uses_temp_file(plugin, tmp_path):
     assert not (tmp_path / "playlist.m3u8.tmp").exists()
 
 
+def test_regenerate_m3u_by_album_groups_by_folder(plugin):
+    # Inserted in non-album order; after regen tracks from the same folder must be contiguous
+    # and within a folder, sorted by filename.
+    _insert(plugin, "alice", "v\\b1.mp3", "/music/AlbumB/01.mp3", ts="2026-05-17 10:00:00")
+    _insert(plugin, "alice", "v\\a2.mp3", "/music/AlbumA/02.mp3", ts="2026-05-17 11:00:00")
+    _insert(plugin, "alice", "v\\b2.mp3", "/music/AlbumB/02.mp3", ts="2026-05-17 12:00:00")
+    _insert(plugin, "alice", "v\\a1.mp3", "/music/AlbumA/01.mp3", ts="2026-05-17 13:00:00")
+    plugin.settings["ordering"] = "by-album"
+    plugin._regenerate_m3u()
+    content = _read_m3u(plugin)
+    order = [
+        content.index(p)
+        for p in (
+            "/music/AlbumA/01.mp3",
+            "/music/AlbumA/02.mp3",
+            "/music/AlbumB/01.mp3",
+            "/music/AlbumB/02.mp3",
+        )
+    ]
+    assert order == sorted(order)
+
+
+def test_regenerate_m3u_by_album_with_dedup(plugin):
+    _insert(plugin, "alice", "v1\\a.mp3", "/music/Album/01.mp3", ts="2026-05-17 10:00:00")
+    _insert(plugin, "bob", "v2\\a.mp3", "/music/Album/01.mp3", ts="2026-05-17 11:00:00")
+    _insert(plugin, "alice", "v3\\b.mp3", "/music/Album/02.mp3", ts="2026-05-17 12:00:00")
+    plugin.settings["ordering"] = "by-album"
+    plugin.settings["dedup"] = True
+    plugin._regenerate_m3u()
+    content = _read_m3u(plugin)
+    assert content.count("/music/Album/01.mp3") == 1
+    assert content.count("/music/Album/02.mp3") == 1
+    assert content.index("/music/Album/01.mp3") < content.index("/music/Album/02.mp3")
+    assert "alice" in content
+    assert "bob" not in content  # first occurrence wins
+
+
 def test_regenerate_m3u_dedup_keeps_first_occurrence_even_with_null_ts(plugin):
     # First insert has no timestamp (backfill of a missing file);
     # second insert has a real timestamp. MIN(id) should keep the NULL-ts row.

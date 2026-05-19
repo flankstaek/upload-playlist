@@ -87,6 +87,7 @@ We deliberately don't try to integration-test against real Nicotine+ from CI. It
 | `playlist_path` | string | `~/soulseek_uploads.m3u8` | Where to write the playlist. History DB is `<playlist_path>.history.db`. |
 | `audio_extensions` | list string | `mp3, flac, m4a, aac, ogg, opus, wav, aiff, aif, wma, ape, wv` | Extensions to include in the M3U projection; everything else is recorded in the DB but never written to the M3U |
 | `dedup` | bool | `false` | When on, the M3U lists each `real_path` at most once. DB still records every event. Run `/playlist-reload` after toggling. |
+| `ordering` | dropdown | `chronological` | `chronological` lists uploads by time (NULL-ts backfill rows first). `by-album` groups tracks by folder (`ORDER BY real_path`); in this mode every live event rewrites the M3U via temp-file + `os.replace` so groups stay contiguous as new tracks arrive. |
 
 ## Commands
 
@@ -121,6 +122,13 @@ No long-lived `sqlite3.Connection` on `self` — every live event does `connect 
 
 ### Dedup is a projection setting, not an event filter
 With `dedup` on, the DB still records every event; only the M3U collapses. The live hook checks `SELECT 1 FROM uploads WHERE real_path = ?` before appending and skips the append on a hit. Toggling `dedup` is therefore a regen-only operation (`/playlist-reload`) — no data is lost when going from on to off. The M3U entry that survives a dedup collapse uses the **first** upload's metadata (`MIN(id)` per `real_path`), so once a track is in the playlist it stays in its original position rather than bubbling to the bottom on re-shares; external players see stable line ordering in chronological mode.
+
+### Ordering: chronological (append-only fast path) vs by-album (full regen per event)
+`chronological` mode is the default and matches the original "honest log" framing: `ORDER BY ts ASC` with NULL-ts (backfill-of-missing-file) rows sorted first. The live hook appends one `#EXTINF` pair to the M3U — no rewrite needed because the new row is already at the end of the chronological projection.
+
+`by-album` mode groups tracks by folder via `ORDER BY real_path ASC`. Because `real_path` includes the filename, this single clause both groups by directory *and* sorts within the directory by filename (which usually embeds track number in well-named rips). The live hook in this mode cannot append — a new track for an existing album has to land mid-file, not at the end — so it calls `_regenerate_m3u()` (temp-file + `os.replace`) on every upload. At realistic scale this is microseconds; the M3U is small and SQLite reads are fast.
+
+We considered a buffered/deferred-flush approach for `by-album` (only flush a folder once we think it's "complete") and rejected it: Soulseek emits no "album complete" event, any flush heuristic has real failure modes, and late arrivals (a stray track an hour later) fragment albums regardless. Full regen sidesteps all of that. The one remaining concern is external-player behavior on mid-playback rewrite — verified manually per player; the documented fallback is debounced regen if a target player misbehaves.
 
 ### Append mode, not overwrite
 The playlist is opened with `"a"` and the `#EXTM3U` header is only written when the file is new or empty. This means the playlist persists across plugin reloads and Nicotine+ restarts. Earlier iterations used `"w"` (truncate), which wiped the log on every reload.

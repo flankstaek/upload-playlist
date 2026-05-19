@@ -29,6 +29,7 @@ class Plugin(BasePlugin):
                 "wv",
             ],
             "dedup": False,
+            "ordering": "chronological",
         }
         self.metasettings = {
             "playlist_path": {
@@ -45,6 +46,15 @@ class Plugin(BasePlugin):
                     "Run /playlist-reload after toggling."
                 ),
                 "type": "bool",
+            },
+            "ordering": {
+                "description": (
+                    "How to order playlist entries. 'chronological' lists uploads in time order; "
+                    "'by-album' groups tracks by folder. In by-album mode the playlist is "
+                    "rewritten on every upload."
+                ),
+                "type": "dropdown",
+                "options": ("chronological", "by-album"),
             },
         }
 
@@ -119,9 +129,12 @@ class Plugin(BasePlugin):
             return
 
         display_name = os.path.basename(real_path)
-        with open(self._playlist_path, "a", encoding="utf-8") as f:
-            f.write(f"#EXTINF:-1,{display_name} [uploaded to {user} at {ts}]\n")
-            f.write(f"{real_path}\n")
+        if self.settings.get("ordering") == "by-album":
+            self._regenerate_m3u()
+        else:
+            with open(self._playlist_path, "a", encoding="utf-8") as f:
+                f.write(f"#EXTINF:-1,{display_name} [uploaded to {user} at {ts}]\n")
+                f.write(f"{real_path}\n")
 
         self.log(f"Added to playlist: {display_name} (downloaded by {user})")
 
@@ -183,22 +196,28 @@ class Plugin(BasePlugin):
         return cur.rowcount
 
     def _select_for_ordering(self, conn):
+        by_album = self.settings.get("ordering") == "by-album"
+        if by_album:
+            order_by = "ORDER BY real_path ASC, id ASC"
+        else:
+            order_by = "ORDER BY ts IS NULL DESC, ts ASC, id ASC"
+
         if self.settings.get("dedup"):
             return conn.execute(
-                """
-                SELECT u.ts, u.user, u.real_path
+                f"""
+                SELECT ts, user, real_path
                 FROM uploads u
-                WHERE u.id = (
+                WHERE id = (
                     SELECT MIN(id) FROM uploads WHERE real_path = u.real_path
                 )
-                ORDER BY u.ts IS NULL DESC, u.ts ASC, u.id ASC
+                {order_by}
                 """
             )
         return conn.execute(
-            """
+            f"""
             SELECT ts, user, real_path
             FROM uploads
-            ORDER BY ts IS NULL DESC, ts ASC, id ASC
+            {order_by}
             """
         )
 
