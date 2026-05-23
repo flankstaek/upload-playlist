@@ -2,26 +2,6 @@
 
 Iterative plan. Ordered roughly by priority and dependency — earlier items unblock later ones.
 
-## Bugs
-
-### `_regenerate_m3u` crashes on Windows when an external player has the M3U open
-
-**Symptom:** `PermissionError: [WinError 5] Access is denied: '<playlist>.tmp' -> '<playlist>'` raised from `os.replace(tmp_path, self._playlist_path)`. Reproduced on Windows with the Zed editor holding the M3U open while running `/playlist-backfill`. The DB write that preceded the regen succeeded; only the projection swap failed, leaving a stale M3U and a stray `.tmp` file on disk.
-
-**Affected paths:** any caller of `_regenerate_m3u()` — `/playlist-backfill`, `/playlist-reload`, and every live `upload_finished_notification` in `by-album` mode.
-
-**Why it happens:** Windows refuses to rename over a file that another process has opened without `FILE_SHARE_DELETE`. Editors (Zed reproduced; VS Code, Notepad++ etc. likely the same class) hold the handle for the duration the file is open in a buffer. Media players that read-and-release on load — Windows Media Player verified, VLC likely similar — do *not* trigger this, and regen swaps complete cleanly even with the M3U actively playing (WMP kept the current track playing uninterrupted through a `/playlist-reload`). So the realistic trigger surface is editors and any player that holds the handle for the lifetime of playback, not all external readers.
-
-**Architectural context:** `architecture.md` already flagged external-player behavior on by-album rewrites as a manual-test concern, but anticipated *player misbehavior* (stale playback, audible glitches), not *plugin crash*. This bug is strictly worse than the documented risk and predates by-album mode — it would affect any regen call.
-
-**Options (not yet decided):**
-1. **Document only.** Tell users to close their player before running reload/backfill, accept the crash in by-album mode. Cheapest, but `/playlist-backfill` on a fresh install can race with a player that auto-loads the M3U.
-2. **Catch + retry with backoff.** Wrap `os.replace` in a short retry loop (e.g. 3 tries, 100ms each). Helps with transient locks but doesn't help a player that holds the handle for the duration of playback.
-3. **Fall back to truncate-and-rewrite on `PermissionError`.** Loses atomicity (external reader can see a partial file) but makes the regen succeed. Acceptable for `/playlist-backfill` and `/playlist-reload` (explicit user actions); risky for by-album live regen.
-4. **Hybrid.** Try `os.replace`; on `PermissionError`, log a warning and fall back to in-place write. Cleanup of any leftover `.tmp` on next successful regen.
-
-**Immediate workaround:** close the player, re-run the failed command. Manually delete any stray `<playlist>.tmp` file.
-
 ## Done: verify the live hook
 
 Confirmed firing on real uploads — entries land in the M3U and play in external players.
@@ -165,6 +145,22 @@ All subsequent features operate against the owned DB rather than Nicotine+'s rol
 A *buffering / deferred-flush* approach (only flush a folder once we "knew" the album was complete) was rejected because: Soulseek has no "album complete" event so any heuristic has real failure modes (last album of session never flushes; concurrent downloads thrash; needs a `threading.Timer` lifecycle); late arrivals fragment albums regardless of buffering; full regen + `os.replace` solves the only real concern (truncated reads by external players) in one line of code.
 
 **Manual smoke test against external player — done:** Windows Media Player kept playing the current track uninterrupted through a `/playlist-reload` regen with the M3U loaded. No audible disruption, no `os.replace` failure (WMP doesn't hold the file handle the way editors do — see the Bugs section above). Debounced-regen fallback not needed for WMP; reassess if a different target player misbehaves.
+
+## Done: handle locked playlist file on Windows
+
+**Symptom:** `PermissionError: [WinError 5] Access is denied: '<playlist>.tmp' -> '<playlist>'` raised from `os.replace`, reproduced with the Zed editor holding the M3U open while running `/playlist-backfill`. Same class of failure applies to the chronological-mode live append (`open(path, "a")`) when the file is similarly locked. Windows refuses operations that need `FILE_SHARE_DELETE` / `FILE_SHARE_WRITE` when another process has the file open without those modes. POSIX systems aren't affected — `rename` and `open("a")` succeed regardless of other holders.
+
+**Considered and rejected:**
+- *Retry with backoff:* helps only transient locks (AV scanners, indexers). The realistic trigger is an editor or player holding the handle for the duration of use — no backoff length helps there, and the log line lives somewhere most users wouldn't notice.
+- *Truncate-and-rewrite fallback on `PermissionError`:* `open(path, "w")` also needs to truncate, which fails on Windows for the same reason whenever the holder opened with read-only sharing (typical for editors). The fallback would itself fail in the realistic case, while losing atomicity for any case where it didn't.
+
+**Shipped:**
+- `_regenerate_m3u()` returns `bool`. On `PermissionError` from `os.replace`, removes the `.tmp` file, logs an actionable message naming the playlist path and `/playlist-reload`, returns `False`.
+- Live append in `upload_finished_notification` wraps `open("a")` in `try/except PermissionError`. The DB write that precedes the append already committed, so the upload is still recorded; the log message tells the user to close the program and run `/playlist-reload`.
+- `cmd_backfill` and `cmd_reload` check the regen return and surface a distinct chat-output message on failure.
+- By-album live regen: `upload_finished_notification` returns early on regen failure so the success log doesn't fire.
+
+**Not addressed:** if the M3U is locked when `init()` runs (e.g. a player auto-loaded the playlist at OS startup), the regen on the "DB exists, M3U missing" branch — or the auto-backfill regen on a truly fresh install — logs and skips. Next user-triggered `/playlist-reload` recovers. We don't proactively poll for the lock to clear; the design assumption is that init is rare and users will notice the log.
 
 ## Next: chronological ordering with album grouping
 

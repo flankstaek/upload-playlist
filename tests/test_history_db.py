@@ -122,6 +122,30 @@ def test_regenerate_m3u_uses_temp_file(plugin, tmp_path):
     assert not (tmp_path / "playlist.m3u8.tmp").exists()
 
 
+def test_regenerate_m3u_returns_true_on_success(plugin):
+    _insert(plugin, "alice", "v\\a.mp3", "/x/a.mp3")
+    assert plugin._regenerate_m3u() is True
+
+
+def test_regenerate_m3u_handles_permission_error_on_replace(plugin, tmp_path, monkeypatch):
+    """Windows-style lock on the destination: clean up .tmp, log, return False."""
+    import upload_playlist
+
+    _insert(plugin, "alice", "v\\a.mp3", "/x/a.mp3")
+
+    def raising_replace(*args, **kwargs):
+        raise PermissionError("[WinError 5] Access is denied")
+
+    monkeypatch.setattr(upload_playlist.os, "replace", raising_replace)
+
+    messages = []
+    monkeypatch.setattr(plugin, "log", lambda msg: messages.append(msg))
+
+    assert plugin._regenerate_m3u() is False
+    assert not (tmp_path / "playlist.m3u8.tmp").exists()
+    assert any("/playlist-reload" in m for m in messages)
+
+
 def test_regenerate_m3u_by_album_groups_by_folder(plugin):
     # Inserted in non-album order; after regen tracks from the same folder must be contiguous
     # and within a folder, sorted by filename.

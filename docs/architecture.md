@@ -130,6 +130,15 @@ With `dedup` on, the DB still records every event; only the M3U collapses. The l
 
 We considered a buffered/deferred-flush approach for `by-album` (only flush a folder once we think it's "complete") and rejected it: Soulseek emits no "album complete" event, any flush heuristic has real failure modes, and late arrivals (a stray track an hour later) fragment albums regardless. Full regen sidesteps all of that. The one remaining concern is external-player behavior on mid-playback rewrite — verified manually per player; the documented fallback is debounced regen if a target player misbehaves.
 
+### Windows file locks: catch and log, don't crash
+`os.replace` and `open("a")` both fail on Windows with `PermissionError` if another process holds the destination open without the relevant share modes (`FILE_SHARE_DELETE` / `FILE_SHARE_WRITE`). Editors (Zed verified; VS Code, Notepad++ likely) and some media players take such handles. Media players that read-and-release on load — Windows Media Player verified — don't trigger it.
+
+Both write paths catch `PermissionError`:
+- `_regenerate_m3u()` returns `bool`. On failure, it cleans up the `.tmp` file, logs an actionable message ("close the program holding it and run /playlist-reload"), returns `False`. Callers (`cmd_backfill`, `cmd_reload`, by-album live hook) act on the return.
+- Live append wraps `open("a")` in `try/except PermissionError`. The DB row has already committed by that point, so the event is preserved — only the M3U projection is out of date until the next successful regen.
+
+Rejected alternatives: retrying with backoff doesn't help when the holder is an editor with the file open for hours; falling back to in-place `open("w")` rewrite also fails on Windows for the same lock reason while sacrificing atomicity in cases where the original `os.replace` would have succeeded.
+
 ### Append mode, not overwrite
 The playlist is opened with `"a"` and the `#EXTM3U` header is only written when the file is new or empty. This means the playlist persists across plugin reloads and Nicotine+ restarts. Earlier iterations used `"w"` (truncate), which wiped the log on every reload.
 

@@ -216,3 +216,74 @@ def test_cmd_reload_regenerates_from_db(make_plugin, tmp_path):
         content = f.read()
     assert content.startswith("#EXTM3U\n")
     assert "a.mp3" in content
+
+
+def test_upload_finished_handles_permission_error_on_append(make_plugin, tmp_path, monkeypatch):
+    """Chronological mode: locked M3U logs a message, DB row still recorded."""
+    import upload_playlist
+
+    p = make_plugin()
+    p.init()
+
+    real_path = str(tmp_path / "track.mp3")
+    original_open = open
+
+    def restricted_open(path, mode="r", *args, **kwargs):
+        if path == p._playlist_path and "a" in mode:
+            raise PermissionError("[WinError 5] Access is denied")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(upload_playlist, "open", restricted_open, raising=False)
+
+    messages = []
+    monkeypatch.setattr(p, "log", lambda msg: messages.append(msg))
+
+    p.upload_finished_notification("alice", "music\\track.mp3", real_path)
+
+    conn = sqlite3.connect(p._history_db_path)
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM uploads WHERE real_path = ?", (real_path,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 1
+    assert any("/playlist-reload" in m for m in messages)
+
+
+def test_cmd_reload_reports_failure_on_permission_error(make_plugin, monkeypatch):
+    import upload_playlist
+
+    p = make_plugin()
+    p.init()
+
+    def raising_replace(*args, **kwargs):
+        raise PermissionError("[WinError 5] Access is denied")
+
+    monkeypatch.setattr(upload_playlist.os, "replace", raising_replace)
+
+    outputs = []
+    monkeypatch.setattr(p, "output", lambda msg: outputs.append(msg))
+
+    p.cmd_reload(args="")
+
+    assert any("open in another program" in m for m in outputs)
+
+
+def test_cmd_backfill_reports_failure_on_permission_error(make_plugin, monkeypatch):
+    import upload_playlist
+
+    p = make_plugin()
+    p.init()
+
+    def raising_replace(*args, **kwargs):
+        raise PermissionError("[WinError 5] Access is denied")
+
+    monkeypatch.setattr(upload_playlist.os, "replace", raising_replace)
+
+    outputs = []
+    monkeypatch.setattr(p, "output", lambda msg: outputs.append(msg))
+
+    p.cmd_backfill(args="")
+
+    assert any("/playlist-reload" in m for m in outputs)

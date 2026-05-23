@@ -130,11 +130,20 @@ class Plugin(BasePlugin):
 
         display_name = os.path.basename(real_path)
         if self.settings.get("ordering") == "by-album":
-            self._regenerate_m3u()
+            if not self._regenerate_m3u():
+                return
         else:
-            with open(self._playlist_path, "a", encoding="utf-8") as f:
-                f.write(f"#EXTINF:-1,{display_name} [uploaded to {user} at {ts}]\n")
-                f.write(f"{real_path}\n")
+            try:
+                with open(self._playlist_path, "a", encoding="utf-8") as f:
+                    f.write(f"#EXTINF:-1,{display_name} [uploaded to {user} at {ts}]\n")
+                    f.write(f"{real_path}\n")
+            except PermissionError:
+                self.log(
+                    f"Could not append to playlist: {self._playlist_path} is open in another "
+                    "program. Upload recorded to history; run /playlist-reload once the "
+                    "program is closed."
+                )
+                return
 
         self.log(f"Added to playlist: {display_name} (downloaded by {user})")
 
@@ -149,15 +158,25 @@ class Plugin(BasePlugin):
         if not self._playlist_path:
             return True
         count = self._import_uploads_json()
-        self._regenerate_m3u()
-        self.output(f"Backfill imported {count} new entries to history; playlist regenerated.")
+        if self._regenerate_m3u():
+            self.output(f"Backfill imported {count} new entries to history; playlist regenerated.")
+        else:
+            self.output(
+                f"Backfill imported {count} new entries to history, but the playlist file "
+                "is open in another program. Close it and run /playlist-reload."
+            )
         return True
 
     def cmd_reload(self, args, **kwargs):
         if not self._playlist_path:
             return True
-        self._regenerate_m3u()
-        self.output("Playlist regenerated from history.")
+        if self._regenerate_m3u():
+            self.output("Playlist regenerated from history.")
+        else:
+            self.output(
+                "Could not regenerate: playlist file is open in another program. "
+                "Close it and try again."
+            )
         return True
 
     def _db_connect(self):
@@ -232,7 +251,19 @@ class Plugin(BasePlugin):
                 suffix = f"[uploaded to {user} at {ts}]" if ts else f"[uploaded to {user}]"
                 f.write(f"#EXTINF:-1,{display_name} {suffix}\n")
                 f.write(f"{real_path}\n")
-        os.replace(tmp_path, self._playlist_path)
+        try:
+            os.replace(tmp_path, self._playlist_path)
+            return True
+        except PermissionError:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            self.log(
+                f"Could not update playlist: {self._playlist_path} is open in another "
+                "program (editor or media player). Close it and run /playlist-reload."
+            )
+            return False
 
     def _import_uploads_json(self):
         sources = self._find_uploads_sources()
