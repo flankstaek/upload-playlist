@@ -101,6 +101,7 @@ def test_init_db_exists_m3u_missing_regenerates(make_plugin, tmp_path):
 
 def test_upload_finished_appends_to_m3u_and_db(make_plugin, tmp_path):
     p = make_plugin()
+    p.settings["ordering"] = "chronological"
     p.init()
 
     real_path = str(tmp_path / "track.mp3")
@@ -136,6 +137,7 @@ def test_upload_finished_non_playable_recorded_but_not_in_m3u(make_plugin, tmp_p
 
 def test_upload_finished_dedup_off_appends_twice(make_plugin, tmp_path):
     p = make_plugin()
+    p.settings["ordering"] = "chronological"
     p.init()
     real_path = str(tmp_path / "track.mp3")
     # Different users so the DB UNIQUE constraint doesn't ignore the second insert.
@@ -148,6 +150,7 @@ def test_upload_finished_dedup_off_appends_twice(make_plugin, tmp_path):
 
 def test_upload_finished_dedup_on_skips_second_append(make_plugin, tmp_path):
     p = make_plugin()
+    p.settings["ordering"] = "chronological"
     p.settings["dedup"] = True
     p.init()
     real_path = str(tmp_path / "track.mp3")
@@ -195,6 +198,37 @@ def test_upload_finished_by_album_regenerates_and_groups(make_plugin, tmp_path):
     assert order == sorted(order)
 
 
+def test_upload_finished_by_album_chronological_regenerates_per_event(make_plugin, tmp_path):
+    p = make_plugin()
+    p.settings["ordering"] = "by-album-chronological"
+    p.init()
+
+    album_a = tmp_path / "AlbumA"
+    album_b = tmp_path / "AlbumB"
+    album_a.mkdir()
+    album_b.mkdir()
+
+    # AlbumB's first track arrives before AlbumA's → AlbumB should be the first group.
+    # Interleaved uploads must still group together once all events are in.
+    p.upload_finished_notification("alice", "v\\b1.mp3", str(album_b / "01.mp3"))
+    p.upload_finished_notification("alice", "v\\a1.mp3", str(album_a / "01.mp3"))
+    p.upload_finished_notification("alice", "v\\b2.mp3", str(album_b / "02.mp3"))
+    p.upload_finished_notification("alice", "v\\a2.mp3", str(album_a / "02.mp3"))
+
+    with open(p._playlist_path, encoding="utf-8") as f:
+        content = f.read()
+    order = [
+        content.index(str(path))
+        for path in (
+            album_b / "01.mp3",
+            album_b / "02.mp3",
+            album_a / "01.mp3",
+            album_a / "02.mp3",
+        )
+    ]
+    assert order == sorted(order)
+
+
 def test_cmd_reload_regenerates_from_db(make_plugin, tmp_path):
     p = make_plugin()
     p.init()
@@ -223,6 +257,7 @@ def test_upload_finished_handles_permission_error_on_append(make_plugin, tmp_pat
     import upload_playlist
 
     p = make_plugin()
+    p.settings["ordering"] = "chronological"
     p.init()
 
     real_path = str(tmp_path / "track.mp3")

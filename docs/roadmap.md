@@ -162,32 +162,19 @@ A *buffering / deferred-flush* approach (only flush a folder once we "knew" the 
 
 **Not addressed:** if the M3U is locked when `init()` runs (e.g. a player auto-loaded the playlist at OS startup), the regen on the "DB exists, M3U missing" branch — or the auto-backfill regen on a truly fresh install — logs and skips. Next user-triggered `/playlist-reload` recovers. We don't proactively poll for the lock to clear; the design assumption is that init is rare and users will notice the log.
 
-## Next: chronological ordering with album grouping
+## Done: chronological ordering with album grouping
 
-**Why:** current `by-album` mode sorts folders alphabetically by full path, which makes the playlist a static catalog and throws away the recency signal that's the whole point of an upload log. Plain `chronological` mode preserves recency but scatters an album across whatever else was uploaded in between. The interesting middle ground: chronological as the primary sort, but group all tracks from the same folder together so an album plays cohesively when you hit one of its tracks.
+**Why:** plain `by-album` sorts folders alphabetically by full path — a static catalog that throws away the recency signal that's the whole point of an upload log. Plain `chronological` preserves recency but scatters an album across whatever else was uploaded in between. The middle ground: chronological as the primary sort, but group all tracks from the same folder together so an album plays cohesively when you hit one of its tracks.
 
-**Behavior:** introduce a third option in the existing `ordering` dropdown — e.g. `by-album-chronological` — alongside `chronological` and `by-album`. Folders are ordered by their first appearance in the upload history; within a folder, tracks sort by filename (same as `by-album` today).
+**Shipped:**
+- New `by-album-chronological` option in the `ordering` dropdown, **promoted to default** (replaces `chronological` as default). Plain `by-album` and `chronological` remain as alternatives.
+- Folders are ordered by `MIN(ts)` per `real_dir` — first appearance wins, so albums stay in place when someone re-downloads a track. Folders where *every* row has NULL ts (backfill-only, source file gone) sort first (matches chronological mode's backfill-first ordering); folders with a mix of NULL and timestamped rows use the non-NULL `MIN(ts)` and sort normally.
+- `MIN(id)` is the tiebreaker on equal `MIN(ts)` (events landing in the same second still resolve by insert order — not alphabetical fallback to `real_path`).
+- Within a folder: `ORDER BY real_path ASC, id ASC` — same as plain `by-album`.
+- Schema bump to v2: added `real_dir TEXT` column with index, populated on insert from `os.path.dirname(real_path)`. Migration ALTERs the table and backfills `real_dir` for existing rows. Doing the dirname split in Python (on insert) sidesteps SQLite's lack of a stdlib `dirname` and the OS-dependent path separator.
+- Live hook regenerates on every event in this mode (same as plain `by-album`), since a new album has to slot in by `MIN(ts)` and a new track for an existing album lands inside that group rather than at the end.
 
-**Why `MIN(ts)` for the album timestamp, not `MAX(ts)`:**
-- Stable position: once an album lands in the playlist it stays where it is, even if someone redownloads a different track from it months later.
-- Matches existing dedup semantics (`MIN(id) per real_path` is the surviving row on dedup collapse — "first sight wins").
-- `MAX(ts)` would make albums bubble up on every re-download. That's a useful "recent activity" *view*, but it's a different feature; reordering on every event is confusing in a log.
-
-**Implementation sketch:**
-- SQLite doesn't have a stdlib `dirname` function, so derive the folder by stripping the trailing filename via `substr` + `instr` on the path separator. Soulseek paths use `\` regardless of OS (architecture.md), but `real_path` is the local filesystem path so the separator is OS-dependent. Cleaner option: store `real_dir` as a separate column on insert, indexed; one schema migration.
-- Sort SQL becomes roughly:
-  ```sql
-  WITH album_ts AS (
-    SELECT real_dir, MIN(ts) AS first_ts FROM uploads GROUP BY real_dir
-  )
-  SELECT u.ts, u.user, u.real_path
-  FROM uploads u JOIN album_ts a USING (real_dir)
-  ORDER BY a.first_ts IS NULL DESC, a.first_ts ASC, u.real_path ASC, u.id ASC
-  ```
-  (NULL-ts backfill rows: their album's `MIN(ts)` is NULL → sorts first, consistent with chronological mode.)
-- Live hook in this mode still calls `_regenerate_m3u()` on every event (full regen, same as `by-album` today) — a new album means a new group has to slot in by its `MIN(ts)`, and a new track for an existing album lands inside that group rather than at the bottom. The Windows `os.replace` bug above applies equally here.
-
-**Open question:** should this become the new default for `ordering`, demoting plain `by-album` to a niche option? Leaning yes — alphabetical-only is rarely what someone wants from an upload log. Decide when implementing.
+**Why `MIN(ts)` not `MAX(ts)`:** stable position. Once an album lands in the playlist it stays there even if someone re-downloads it months later. Matches existing dedup semantics (`MIN(id)` per `real_path` wins on dedup collapse — "first sight wins"). `MAX(ts)` would make albums bubble up on every re-download — useful as a "recent activity" view, but a different feature; reordering on every event is confusing in a log.
 
 ## Then: more commands
 

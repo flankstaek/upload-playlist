@@ -87,7 +87,7 @@ We deliberately don't try to integration-test against real Nicotine+ from CI. It
 | `playlist_path` | string | `~/soulseek_uploads.m3u8` | Where to write the playlist. History DB is `<playlist_path>.history.db`. |
 | `audio_extensions` | list string | `mp3, flac, m4a, aac, ogg, opus, wav, aiff, aif, wma, ape, wv` | Extensions to include in the M3U projection; everything else is recorded in the DB but never written to the M3U |
 | `dedup` | bool | `false` | When on, the M3U lists each `real_path` at most once. DB still records every event. Run `/playlist-reload` after toggling. |
-| `ordering` | dropdown | `chronological` | `chronological` lists uploads by time (NULL-ts backfill rows first). `by-album` groups tracks by folder (`ORDER BY real_path`); in this mode every live event rewrites the M3U via temp-file + `os.replace` so groups stay contiguous as new tracks arrive. |
+| `ordering` | dropdown | `by-album-chronological` | `by-album-chronological` (default) groups tracks by folder; folders are ordered by their first appearance (`MIN(ts)` per `real_dir`, `MIN(id)` tiebreaker). `chronological` lists uploads by time with no grouping (NULL-ts backfill rows first). `by-album` groups by folder and sorts folders alphabetically. Both by-album modes rewrite the M3U via temp-file + `os.replace` on every live event so groups stay contiguous. |
 
 ## Commands
 
@@ -110,12 +110,17 @@ CREATE TABLE uploads (
     user         TEXT NOT NULL,
     virtual_path TEXT NOT NULL,
     real_path    TEXT NOT NULL,
+    real_dir     TEXT,         -- os.path.dirname(real_path); indexed; powers by-album-chronological grouping
     size         INTEGER,
     source       TEXT NOT NULL -- 'live' | 'backfill'
 );
 CREATE UNIQUE INDEX idx_uploads_dedup ON uploads(user, virtual_path, real_path);
+CREATE INDEX idx_uploads_realdir ON uploads(real_dir);
+-- PRAGMA user_version = 2;
 ```
 The `UNIQUE` index gives write-time dedup for free — backfill becomes idempotent via `INSERT OR IGNORE`, no in-memory `seen` set, no per-row check before insert. Backfill timestamps come from `os.stat(real_path).st_mtime`; if the file is gone we record `NULL` and sort those rows first ("history first, then new captures").
+
+`real_dir` is stored as its own column rather than derived in SQL at query time because SQLite has no stdlib `dirname` and the path separator is OS-dependent. We compute it in Python (`os.path.dirname(real_path)`) on insert, indexed for grouping queries. Schema v1 (no `real_dir`) auto-migrates on `_db_init()`: `ALTER TABLE ADD COLUMN`, then backfill `real_dir` for existing rows, then bump `PRAGMA user_version` to 2.
 
 ### Connection lifecycle: open-per-write
 No long-lived `sqlite3.Connection` on `self` — every live event does `connect → INSERT OR IGNORE → commit → close` (hundreds of microseconds, negligible at upload frequency). Backfill wraps all inserts in a single transaction (~100× faster than per-row commit). WAL mode (`PRAGMA journal_mode=WAL`) so future stats queries don't block live inserts. Mirrors the same open-per-write rationale the M3U already uses.
@@ -123,12 +128,16 @@ No long-lived `sqlite3.Connection` on `self` — every live event does `connect 
 ### Dedup is a projection setting, not an event filter
 With `dedup` on, the DB still records every event; only the M3U collapses. The live hook checks `SELECT 1 FROM uploads WHERE real_path = ?` before appending and skips the append on a hit. Toggling `dedup` is therefore a regen-only operation (`/playlist-reload`) — no data is lost when going from on to off. The M3U entry that survives a dedup collapse uses the **first** upload's metadata (`MIN(id)` per `real_path`), so once a track is in the playlist it stays in its original position rather than bubbling to the bottom on re-shares; external players see stable line ordering in chronological mode.
 
-### Ordering: chronological (append-only fast path) vs by-album (full regen per event)
-`chronological` mode is the default and matches the original "honest log" framing: `ORDER BY ts ASC` with NULL-ts (backfill-of-missing-file) rows sorted first. The live hook appends one `#EXTINF` pair to the M3U — no rewrite needed because the new row is already at the end of the chronological projection.
+### Ordering modes
+Three options on the `ordering` setting:
 
-`by-album` mode groups tracks by folder via `ORDER BY real_path ASC`. Because `real_path` includes the filename, this single clause both groups by directory *and* sorts within the directory by filename (which usually embeds track number in well-named rips). The live hook in this mode cannot append — a new track for an existing album has to land mid-file, not at the end — so it calls `_regenerate_m3u()` (temp-file + `os.replace`) on every upload. At realistic scale this is microseconds; the M3U is small and SQLite reads are fast.
+- **`by-album-chronological` (default).** Folders are ordered by their first appearance — `MIN(ts)` per `real_dir`, with `MIN(id)` as a tiebreaker so events landing in the same second still resolve by insert order rather than falling through to alphabetical real_path. Within a folder: `ORDER BY real_path ASC, id ASC` (the filename is part of the path, so this groups *and* sorts by track number for well-named rips; `id` is a final tiebreaker for rows sharing a `real_path`). Folders where *every* row has NULL ts (backfill-only, source file gone) sort first, consistent with chronological mode's backfill-first ordering — folders with a mix of NULL and timestamped rows use the non-NULL `MIN(ts)` and sort normally. Stable on re-downloads: once an album lands in the playlist it stays there, because `MIN(ts)` doesn't move when someone re-shares an old track. We use `MIN`, not `MAX`, deliberately — a "most recent activity" view would bubble albums on every event and isn't what an upload *log* should do.
+- **`chronological`.** The original "honest log" framing: `ORDER BY ts ASC` with NULL-ts rows first. No grouping. Only mode where the live hook can append one `#EXTINF` pair instead of regenerating, because the new row is already at the end of the projection.
+- **`by-album`.** Folders sorted alphabetically (`ORDER BY real_path ASC`). Kept as a niche option for users who want catalog-style ordering instead of recency.
 
-We considered a buffered/deferred-flush approach for `by-album` (only flush a folder once we think it's "complete") and rejected it: Soulseek emits no "album complete" event, any flush heuristic has real failure modes, and late arrivals (a stray track an hour later) fragment albums regardless. Full regen sidesteps all of that. The one remaining concern is external-player behavior on mid-playback rewrite — verified manually per player; the documented fallback is debounced regen if a target player misbehaves.
+Both by-album modes call `_regenerate_m3u()` (temp-file + `os.replace`) on every upload: a new album has to slot in by its `MIN(ts)` (or by alphabetical position), and a new track for an existing album has to land inside that group rather than at the end. At realistic scale this is microseconds; the M3U is small and SQLite reads are fast.
+
+We considered a buffered/deferred-flush approach for by-album modes (only flush a folder once we think it's "complete") and rejected it: Soulseek emits no "album complete" event, any flush heuristic has real failure modes, and late arrivals (a stray track an hour later) fragment albums regardless. Full regen sidesteps all of that. The one remaining concern is external-player behavior on mid-playback rewrite — verified manually per player; the documented fallback is debounced regen if a target player misbehaves.
 
 ### Windows file locks: catch and log, don't crash
 `os.replace` and `open("a")` both fail on Windows with `PermissionError` if another process holds the destination open without the relevant share modes (`FILE_SHARE_DELETE` / `FILE_SHARE_WRITE`). Editors (Zed verified; VS Code, Notepad++ likely) and some media players take such handles. Media players that read-and-release on load — Windows Media Player verified — don't trigger it.

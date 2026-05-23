@@ -29,7 +29,7 @@ class Plugin(BasePlugin):
                 "wv",
             ],
             "dedup": False,
-            "ordering": "chronological",
+            "ordering": "by-album-chronological",
         }
         self.metasettings = {
             "playlist_path": {
@@ -49,12 +49,14 @@ class Plugin(BasePlugin):
             },
             "ordering": {
                 "description": (
-                    "How to order playlist entries. 'chronological' lists uploads in time order; "
-                    "'by-album' groups tracks by folder. In by-album mode the playlist is "
-                    "rewritten on every upload."
+                    "How to order playlist entries. 'by-album-chronological' (default) groups "
+                    "tracks by folder, with folders ordered by when the album first appeared. "
+                    "'chronological' lists uploads in time order with no grouping. 'by-album' "
+                    "groups by folder and sorts folders alphabetically. by-album modes rewrite "
+                    "the playlist on every upload."
                 ),
                 "type": "dropdown",
-                "options": ("chronological", "by-album"),
+                "options": ("by-album-chronological", "chronological", "by-album"),
             },
         }
 
@@ -129,7 +131,7 @@ class Plugin(BasePlugin):
             return
 
         display_name = os.path.basename(real_path)
-        if self.settings.get("ordering") == "by-album":
+        if self.settings.get("ordering") in ("by-album", "by-album-chronological"):
             if not self._regenerate_m3u():
                 return
         else:
@@ -194,34 +196,83 @@ class Plugin(BasePlugin):
                     user         TEXT NOT NULL,
                     virtual_path TEXT NOT NULL,
                     real_path    TEXT NOT NULL,
+                    real_dir     TEXT,
                     size         INTEGER,
                     source       TEXT NOT NULL
                 );
+                """
+            )
+            # v1 → v2: add real_dir column and backfill from real_path.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(uploads)")}
+            if "real_dir" not in cols:
+                conn.execute("ALTER TABLE uploads ADD COLUMN real_dir TEXT")
+            for row_id, real_path in conn.execute(
+                "SELECT id, real_path FROM uploads WHERE real_dir IS NULL"
+            ).fetchall():
+                conn.execute(
+                    "UPDATE uploads SET real_dir = ? WHERE id = ?",
+                    (os.path.dirname(real_path), row_id),
+                )
+            conn.executescript(
+                """
                 CREATE INDEX IF NOT EXISTS idx_uploads_ts ON uploads(ts);
                 CREATE INDEX IF NOT EXISTS idx_uploads_realpath ON uploads(real_path);
+                CREATE INDEX IF NOT EXISTS idx_uploads_realdir ON uploads(real_dir);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_uploads_dedup
                     ON uploads(user, virtual_path, real_path);
-                PRAGMA user_version = 1;
+                PRAGMA user_version = 2;
                 """
             )
             conn.commit()
 
     def _record_upload(self, user, virtual_path, real_path, size, source, ts, conn):
         cur = conn.execute(
-            "INSERT OR IGNORE INTO uploads (ts, user, virtual_path, real_path, size, source) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (ts, user, virtual_path, real_path, size, source),
+            "INSERT OR IGNORE INTO uploads "
+            "(ts, user, virtual_path, real_path, real_dir, size, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts, user, virtual_path, real_path, os.path.dirname(real_path), size, source),
         )
         return cur.rowcount
 
     def _select_for_ordering(self, conn):
-        by_album = self.settings.get("ordering") == "by-album"
-        if by_album:
+        ordering = self.settings.get("ordering")
+        dedup = bool(self.settings.get("dedup"))
+
+        if ordering == "by-album-chronological":
+            # Folders ordered by their first appearance (MIN(ts) per real_dir, NULLs first);
+            # within a folder, tracks sort by filename (real_path includes the filename).
+            dedup_filter = (
+                "WHERE u.id = (SELECT MIN(id) FROM uploads WHERE real_path = u.real_path)"
+                if dedup
+                else ""
+            )
+            return conn.execute(
+                f"""
+                WITH album_ts AS (
+                    SELECT real_dir,
+                           MIN(ts) AS first_ts,
+                           MIN(id) AS first_id
+                    FROM uploads
+                    GROUP BY real_dir
+                )
+                SELECT u.ts, u.user, u.real_path
+                FROM uploads u
+                JOIN album_ts a USING (real_dir)
+                {dedup_filter}
+                ORDER BY a.first_ts IS NULL DESC,
+                         a.first_ts ASC,
+                         a.first_id ASC,
+                         u.real_path ASC,
+                         u.id ASC
+                """
+            )
+
+        if ordering == "by-album":
             order_by = "ORDER BY real_path ASC, id ASC"
         else:
             order_by = "ORDER BY ts IS NULL DESC, ts ASC, id ASC"
 
-        if self.settings.get("dedup"):
+        if dedup:
             return conn.execute(
                 f"""
                 SELECT ts, user, real_path

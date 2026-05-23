@@ -28,6 +28,7 @@ A [Nicotine+](https://nicotine-plus.github.io/) plugin that writes a live M3U pl
 - `playlist_path` — where to write the playlist (default: `~/soulseek_uploads.m3u8`; `.m3u8` signals UTF-8 so non-ASCII paths resolve correctly). The history DB lives at `<playlist_path>.history.db`.
 - `audio_extensions` — which file types to include (default: mp3, flac, m4a, aac, ogg, opus, wav, aiff, aif, wma, ape, wv)
 - `dedup` — collapse repeated uploads of the same file into a single playlist entry (default: off). The DB still records every event. Run `/playlist-reload` after toggling.
+- `ordering` — how to order playlist entries (default: `by-album-chronological`). Options: `by-album-chronological` (group tracks by folder; folders ordered by when the album first appeared), `chronological` (uploads in time order, no grouping), `by-album` (group by folder, folders sorted alphabetically). Run `/playlist-reload` after changing.
 
 ## Install
 

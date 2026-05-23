@@ -33,11 +33,76 @@ def test_db_init_creates_schema(plugin):
     conn = sqlite3.connect(plugin._history_db_path)
     try:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(uploads)")}
-        assert cols == {"id", "ts", "user", "virtual_path", "real_path", "size", "source"}
+        assert cols == {
+            "id",
+            "ts",
+            "user",
+            "virtual_path",
+            "real_path",
+            "real_dir",
+            "size",
+            "source",
+        }
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 1
+        assert version == 2
     finally:
         conn.close()
+
+
+def test_db_init_migrates_v1_to_v2(tmp_path):
+    """A pre-existing v1 DB (no real_dir column) gets the column added and backfilled."""
+    from upload_playlist import Plugin
+
+    db_path = tmp_path / "playlist.m3u8.history.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE uploads (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts           TEXT,
+                user         TEXT NOT NULL,
+                virtual_path TEXT NOT NULL,
+                real_path    TEXT NOT NULL,
+                size         INTEGER,
+                source       TEXT NOT NULL
+            );
+            PRAGMA user_version = 1;
+            """
+        )
+        conn.execute(
+            "INSERT INTO uploads (ts, user, virtual_path, real_path, size, source) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("2026-05-17 10:00:00", "alice", "v\\a.mp3", "/music/Album/01.mp3", 1000, "live"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    p = Plugin()
+    p.settings["playlist_path"] = str(tmp_path / "playlist.m3u8")
+    p._playlist_path = p.settings["playlist_path"]
+    p._db_init()
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(uploads)")}
+        assert "real_dir" in cols
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        row = conn.execute("SELECT real_dir FROM uploads").fetchone()
+        assert row[0] == "/music/Album"
+    finally:
+        conn.close()
+
+
+def test_record_upload_stores_real_dir(plugin):
+    _insert(plugin, "alice", "v\\a.mp3", "/music/Album/01.mp3")
+    conn = sqlite3.connect(plugin._history_db_path)
+    try:
+        row = conn.execute("SELECT real_dir FROM uploads").fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "/music/Album"
 
 
 def test_db_init_is_idempotent(plugin):
@@ -71,6 +136,7 @@ def test_record_upload_different_users_not_deduped(plugin):
 
 
 def test_regenerate_m3u_chronological(plugin):
+    plugin.settings["ordering"] = "chronological"
     _insert(plugin, "alice", "v\\a.mp3", "/x/a.mp3", ts="2026-05-17 10:00:00")
     _insert(plugin, "bob", "v\\b.mp3", "/x/b.mp3", ts="2026-05-17 11:00:00")
     plugin._regenerate_m3u()
@@ -80,6 +146,7 @@ def test_regenerate_m3u_chronological(plugin):
 
 
 def test_regenerate_m3u_nulls_first(plugin):
+    plugin.settings["ordering"] = "chronological"
     _insert(plugin, "alice", "v\\new.mp3", "/x/new.mp3", ts="2026-05-17 10:00:00")
     _insert(plugin, "alice", "v\\old.mp3", "/x/old.mp3", ts=None)
     plugin._regenerate_m3u()
@@ -99,6 +166,7 @@ def test_regenerate_m3u_filters_non_playable(plugin):
 
 
 def test_regenerate_m3u_dedup_off_keeps_duplicates(plugin):
+    plugin.settings["ordering"] = "chronological"
     _insert(plugin, "alice", "v1\\a.mp3", "/x/a.mp3", ts="2026-05-17 10:00:00")
     _insert(plugin, "bob", "v2\\a.mp3", "/x/a.mp3", ts="2026-05-17 11:00:00")
     plugin._regenerate_m3u()
@@ -106,6 +174,7 @@ def test_regenerate_m3u_dedup_off_keeps_duplicates(plugin):
 
 
 def test_regenerate_m3u_dedup_on_collapses_real_path(plugin):
+    plugin.settings["ordering"] = "chronological"
     _insert(plugin, "alice", "v1\\a.mp3", "/x/a.mp3", ts="2026-05-17 10:00:00")
     _insert(plugin, "bob", "v2\\a.mp3", "/x/a.mp3", ts="2026-05-17 11:00:00")
     plugin.settings["dedup"] = True
@@ -166,6 +235,77 @@ def test_regenerate_m3u_by_album_groups_by_folder(plugin):
         )
     ]
     assert order == sorted(order)
+
+
+def test_regenerate_m3u_by_album_chronological_orders_folders_by_first_ts(plugin):
+    # AlbumB's first track lands before AlbumA's, so AlbumB should appear first as a group.
+    _insert(plugin, "alice", "v\\b1.mp3", "/music/AlbumB/01.mp3", ts="2026-05-17 10:00:00")
+    _insert(plugin, "alice", "v\\a1.mp3", "/music/AlbumA/01.mp3", ts="2026-05-17 11:00:00")
+    _insert(plugin, "alice", "v\\b2.mp3", "/music/AlbumB/02.mp3", ts="2026-05-17 12:00:00")
+    _insert(plugin, "alice", "v\\a2.mp3", "/music/AlbumA/02.mp3", ts="2026-05-17 13:00:00")
+    plugin.settings["ordering"] = "by-album-chronological"
+    plugin._regenerate_m3u()
+    content = _read_m3u(plugin)
+    order = [
+        content.index(p)
+        for p in (
+            "/music/AlbumB/01.mp3",
+            "/music/AlbumB/02.mp3",
+            "/music/AlbumA/01.mp3",
+            "/music/AlbumA/02.mp3",
+        )
+    ]
+    assert order == sorted(order)
+
+
+def test_regenerate_m3u_by_album_chronological_stable_on_redownload(plugin):
+    # AlbumA arrived first. Later, a fresh AlbumB track lands, *then* a redownload of AlbumA.
+    # AlbumA must stay in its original position — MIN(ts), not MAX(ts).
+    _insert(plugin, "alice", "v\\a1.mp3", "/music/AlbumA/01.mp3", ts="2026-05-17 10:00:00")
+    _insert(plugin, "alice", "v\\b1.mp3", "/music/AlbumB/01.mp3", ts="2026-05-17 11:00:00")
+    _insert(plugin, "bob", "v\\a1b.mp3", "/music/AlbumA/01.mp3", ts="2026-05-17 12:00:00")
+    plugin.settings["ordering"] = "by-album-chronological"
+    plugin._regenerate_m3u()
+    content = _read_m3u(plugin)
+    assert content.index("/music/AlbumA/01.mp3") < content.index("/music/AlbumB/01.mp3")
+
+
+def test_regenerate_m3u_by_album_chronological_tiebreaks_by_insert_order(plugin):
+    # Two folders whose first tracks share the same timestamp — insert order (MIN(id)) decides.
+    # AlbumB is inserted first so it must appear first despite alphabetical ordering.
+    _insert(plugin, "alice", "v\\b1.mp3", "/music/AlbumB/01.mp3", ts="2026-05-17 10:00:00")
+    _insert(plugin, "alice", "v\\a1.mp3", "/music/AlbumA/01.mp3", ts="2026-05-17 10:00:00")
+    plugin.settings["ordering"] = "by-album-chronological"
+    plugin._regenerate_m3u()
+    content = _read_m3u(plugin)
+    assert content.index("/music/AlbumB/01.mp3") < content.index("/music/AlbumA/01.mp3")
+
+
+def test_regenerate_m3u_by_album_chronological_null_ts_folders_first(plugin):
+    # NULL-ts (backfill of missing file) folder should sort before timestamped folders.
+    _insert(plugin, "alice", "v\\a1.mp3", "/music/Backfilled/01.mp3", ts=None, source="backfill")
+    _insert(plugin, "alice", "v\\b1.mp3", "/music/Live/01.mp3", ts="2026-05-17 10:00:00")
+    plugin.settings["ordering"] = "by-album-chronological"
+    plugin._regenerate_m3u()
+    content = _read_m3u(plugin)
+    assert content.index("/music/Backfilled/01.mp3") < content.index("/music/Live/01.mp3")
+
+
+def test_regenerate_m3u_by_album_chronological_with_dedup(plugin):
+    # Same track uploaded by two users: dedup collapses to one entry; folder ordering still by
+    # MIN(ts) per folder (here, just one folder, so the test is about correctness of the join).
+    _insert(plugin, "alice", "v1\\a.mp3", "/music/Album/01.mp3", ts="2026-05-17 10:00:00")
+    _insert(plugin, "bob", "v2\\a.mp3", "/music/Album/01.mp3", ts="2026-05-17 11:00:00")
+    _insert(plugin, "alice", "v3\\b.mp3", "/music/Album/02.mp3", ts="2026-05-17 12:00:00")
+    plugin.settings["ordering"] = "by-album-chronological"
+    plugin.settings["dedup"] = True
+    plugin._regenerate_m3u()
+    content = _read_m3u(plugin)
+    assert content.count("/music/Album/01.mp3") == 1
+    assert content.count("/music/Album/02.mp3") == 1
+    assert content.index("/music/Album/01.mp3") < content.index("/music/Album/02.mp3")
+    assert "alice" in content
+    assert "bob" not in content
 
 
 def test_regenerate_m3u_by_album_with_dedup(plugin):
