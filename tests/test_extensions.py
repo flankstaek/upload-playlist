@@ -3,8 +3,11 @@ from upload_playlist import Plugin
 
 
 @pytest.fixture
-def plugin():
-    return Plugin()
+def plugin(tmp_path):
+    p = Plugin()
+    p.settings["playlist_path"] = str(tmp_path / "playlist.m3u8")
+    p.init()
+    return p
 
 
 @pytest.mark.parametrize(

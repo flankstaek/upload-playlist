@@ -86,7 +86,7 @@ def test_init_db_exists_m3u_missing_regenerates(make_plugin, tmp_path):
     # Insert one row, then delete M3U
     conn = p._db_connect()
     try:
-        p._record_upload("alice", "v\\a.mp3", "/x/a.mp3", 1000, "live", "2026-05-17 10:00:00", conn)
+        p._record_upload("alice", "v\\a.mp3", "/x/a.mp3", "live", "2026-05-17 10:00:00", conn)
         conn.commit()
     finally:
         conn.close()
@@ -236,7 +236,7 @@ def test_cmd_reload_regenerates_from_db(make_plugin, tmp_path):
     conn = p._db_connect()
     try:
         p._record_upload(
-            "alice", "v\\a.mp3", str(tmp_path / "a.mp3"), 1000, "live", "2026-05-17 10:00:00", conn
+            "alice", "v\\a.mp3", str(tmp_path / "a.mp3"), "live", "2026-05-17 10:00:00", conn
         )
         conn.commit()
     finally:

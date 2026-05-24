@@ -9,15 +9,14 @@ from upload_playlist import Plugin
 def plugin(tmp_path):
     p = Plugin()
     p.settings["playlist_path"] = str(tmp_path / "playlist.m3u8")
-    p._playlist_path = p.settings["playlist_path"]
-    p._db_init()
+    p.init()
     return p
 
 
-def _insert(plugin, user, vpath, rpath, ts="2026-05-17 12:00:00", size=1000, source="live"):
+def _insert(plugin, user, vpath, rpath, ts="2026-05-17 12:00:00", source="live"):
     conn = plugin._db_connect()
     try:
-        rc = plugin._record_upload(user, vpath, rpath, size, source, ts, conn)
+        rc = plugin._record_upload(user, vpath, rpath, source, ts, conn)
         conn.commit()
         return rc
     finally:
@@ -40,7 +39,6 @@ def test_db_init_creates_schema(plugin):
             "virtual_path",
             "real_path",
             "real_dir",
-            "size",
             "source",
         }
         version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -82,6 +80,7 @@ def test_db_init_migrates_v1_to_v2(tmp_path):
     p = Plugin()
     p.settings["playlist_path"] = str(tmp_path / "playlist.m3u8")
     p._playlist_path = p.settings["playlist_path"]
+    p._history_db_path = p._playlist_path + ".history.db"
     p._db_init()
 
     conn = sqlite3.connect(str(db_path))
@@ -399,11 +398,10 @@ def test_import_uploads_json_uses_mtime_when_file_exists(plugin, tmp_path, monke
     plugin._import_uploads_json()
     conn = sqlite3.connect(plugin._history_db_path)
     try:
-        ts, size = conn.execute("SELECT ts, size FROM uploads").fetchone()
+        (ts,) = conn.execute("SELECT ts FROM uploads").fetchone()
     finally:
         conn.close()
     assert ts is not None
-    assert size == len(b"fake audio")
 
 
 def test_import_uploads_json_merges_multiple_sources(plugin, tmp_path, monkeypatch):
@@ -438,8 +436,7 @@ def test_import_uploads_json_null_ts_when_file_missing(plugin, tmp_path, monkeyp
     plugin._import_uploads_json()
     conn = sqlite3.connect(plugin._history_db_path)
     try:
-        ts, size = conn.execute("SELECT ts, size FROM uploads").fetchone()
+        (ts,) = conn.execute("SELECT ts FROM uploads").fetchone()
     finally:
         conn.close()
     assert ts is None
-    assert size is None
