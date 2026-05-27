@@ -8,9 +8,16 @@ A Nicotine+ plugin that writes a live M3U playlist of audio files other Soulseek
 
 ```
 upload-playlist/
-├── PLUGININFO          # Nicotine+ plugin metadata
+├── PLUGININFO          # Nicotine+ plugin metadata (version, author, name)
 ├── __init__.py         # All plugin code (single-file by convention)
 ├── install.sh          # Copies plugin into Windows-side Nicotine+ plugins dir
+├── release.sh          # Bumps PLUGININFO version, tags, pushes to both remotes
+├── .tangled/workflows/
+│   └── ci.yml          # Tangled Spindle CI (lint + test)
+├── .github/workflows/
+│   ├── ci.yml          # GitHub Actions CI (lint + test)
+│   └── release.yml     # GitHub Actions CD (package + publish on tag)
+├── tests/              # pytest suite
 └── docs/
     ├── architecture.md                    # This file
     ├── roadmap.md                         # Planned work
@@ -180,6 +187,30 @@ We don't ask the running Nicotine+ for its own data path via `self.config`, even
 
 ### Auto-backfill only on a truly fresh install
 `init()` runs `uploads.json` backfill automatically only when *both* the history DB and the M3U are absent — the "fresh install" branch of the init-cases matrix above. Reloading the plugin after history exists is a no-op; deleting just the M3U regenerates from the DB rather than re-pulling from `uploads.json`. Manual `/playlist-backfill` remains available for re-triggering.
+
+## CI/CD and release pipeline
+
+### Hosting split
+
+Development happens on [Tangled](https://tangled.org/flankstaek.me/upload-playlist) (primary). [GitHub](https://github.com/flankstaek/upload-playlist) is a mirror for discoverability and release distribution. Both remotes are pushed simultaneously via the `all` remote (`git push all main --tags`).
+
+### CI
+
+Lint (`ruff check`, `ruff format --check`) and tests (`pytest`) run on both platforms on every push/PR to main:
+- **Tangled:** Spindle workflow (`.tangled/workflows/ci.yml`) using nixery engine with `python312` + `uv` from nixpkgs.
+- **GitHub:** Actions workflow (`.github/workflows/ci.yml`) using `astral-sh/setup-uv`.
+
+### CD (releases)
+
+GitHub handles release distribution because Tangled has no artifact/release system. The release workflow (`.github/workflows/release.yml`) triggers on `v*` tag push, runs CI as a gate (`needs: ci`), then packages `PLUGININFO` + `__init__.py` into `upload_playlist.zip` and attaches it to a GitHub Release with auto-generated release notes.
+
+### Release process
+
+`./release.sh` automates the full flow: updates `PLUGININFO` version to match the CalVer tag, commits, tags, and pushes to both remotes. If the tag already exists (failed release, same-day retry), the script deletes the old tag from local and both remotes, then retags at HEAD.
+
+### Versioning
+
+CalVer format: `v2026.05.26`, with a dot-suffix for same-day follow-ups (`v2026.05.26.1`). The tag is the canonical version; `PLUGININFO` version is kept in sync by the release script.
 
 ## Lessons learned
 

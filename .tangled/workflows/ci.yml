@@ -1,0 +1,17 @@
+when:
+  - event: ["push", "pull_request"]
+    branch: ["main"]
+  - event: ["manual"]
+
+engine: "nixery"
+
+dependencies:
+  nixpkgs:
+    - python312
+    - uv
+
+steps:
+  - name: "Lint"
+    command: "uv sync --frozen && uv run ruff check && uv run ruff format --check"
+  - name: "Test"
+    command: "uv run pytest"

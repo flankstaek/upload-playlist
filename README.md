@@ -32,7 +32,7 @@ A [Nicotine+](https://nicotine-plus.github.io/) plugin that writes a live M3U pl
 
 ## Install
 
-Nicotine+ loads plugins from a per-platform data directory. Whichever approach you use below, the plugin folder must be named `upload_playlist` (Nicotine+ uses the folder name as the internal plugin ID).
+Nicotine+ loads plugins from a per-platform data directory. The plugin folder must be named `upload_playlist` (Nicotine+ uses the folder name as the internal plugin ID).
 
 | Platform | Plugins directory |
 |---|---|
@@ -42,9 +42,17 @@ Nicotine+ loads plugins from a per-platform data directory. Whichever approach y
 
 After installing, enable the plugin: Nicotine+ → Preferences → Plugins → "Upload Playlist".
 
-### Option A — clone directly into the plugins directory (simplest)
+### Option A — download a release (simplest)
 
-Recommended if your working copy and Nicotine+ are on the same filesystem (native Linux, macOS, or Windows). Edits apply with just a plugin toggle in Preferences — no copy step.
+1. Download `upload_playlist.zip` from the [latest release](https://github.com/flankstaek/upload-playlist/releases/latest)
+2. Extract into your plugins directory (see table above)
+3. Enable the plugin in Preferences
+
+To update, download the new release and extract over the existing folder.
+
+### Option B — clone directly into the plugins directory
+
+For users who prefer git-based updates (`git pull` to update).
 
 ```
 cd ~/.local/share/nicotine/plugins    # or the equivalent path from the table above
@@ -53,7 +61,7 @@ git clone https://tangled.org/flankstaek.me/upload-playlist upload_playlist
 
 Note the rename: the repo is `upload-playlist` (dash) but the cloned folder must be `upload_playlist` (underscore).
 
-### Option B — clone anywhere, sync with `install.sh`
+### Option C — clone anywhere, sync with `install.sh`
 
 Use this when your working copy can't live inside the plugins directory — most commonly when developing in WSL against a Windows-native Nicotine+, since Windows can't follow Linux symlinks. Also fine if you just prefer your source organized under a `~/dev/` root.
 
@@ -86,6 +94,25 @@ uv run ruff format         # format
 ```
 
 Tests use a `pynicotine.pluginsystem.BasePlugin` shim in `tests/conftest.py` so `__init__.py` is importable outside Nicotine+. See [`docs/architecture.md`](docs/architecture.md) for what's covered by pytest vs. manual smoke testing.
+
+### CI/CD
+
+CI runs on both platforms:
+- **Tangled** (primary): [Spindle](https://docs.tangled.org/spindles) workflow in `.tangled/workflows/ci.yml`
+- **GitHub** (mirror): Actions workflow in `.github/workflows/ci.yml`
+
+Both run `ruff check`, `ruff format --check`, and `pytest` on push/PR to main.
+
+Releases are handled by GitHub Actions (`.github/workflows/release.yml`): when a CalVer tag (`v2026.05.26`) is pushed, CI runs as a gate, then `PLUGININFO` + `__init__.py` are packaged into `upload_playlist.zip` and attached to a GitHub Release.
+
+### Releasing
+
+```
+./release.sh               # tags as v<today's date>, pushes to both remotes
+./release.sh v2026.05.26.1 # explicit version for same-day follow-ups
+```
+
+The script updates `PLUGININFO` version, commits, tags, and pushes. If the tag already exists (e.g. a failed release), it deletes and retags at HEAD.
 
 ## Docs
 
