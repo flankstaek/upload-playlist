@@ -322,3 +322,15 @@ def test_cmd_backfill_reports_failure_on_permission_error(make_plugin, monkeypat
     p.cmd_backfill(args="")
 
     assert any("/playlist-reload" in m for m in outputs)
+
+
+def test_cmd_path_outputs_playlist_path(make_plugin, monkeypatch):
+    p = make_plugin()
+    p.init()
+
+    outputs = []
+    monkeypatch.setattr(p, "output", lambda msg: outputs.append(msg))
+
+    p.cmd_path(args="")
+
+    assert outputs == [p._playlist_path]

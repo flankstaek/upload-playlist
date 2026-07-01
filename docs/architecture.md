@@ -20,7 +20,6 @@ upload-playlist/
 ├── tests/              # pytest suite
 └── docs/
     ├── architecture.md                    # This file
-    ├── roadmap.md                         # Planned work
     └── nicotine-plugin-dev-reference.md   # Condensed plugin API reference
 ```
 
@@ -28,10 +27,19 @@ The plugin folder *is* the repo — Nicotine+ treats each plugin folder as self-
 
 ## Dev environment
 
-- Repo lives in WSL (`/home/conan/dev/upload-playlist/`)
-- Nicotine+ runs natively on Windows, reading plugins from `C:\Users\conan\AppData\Roaming\nicotine\plugins\upload_playlist\`
-- Windows can't follow Linux symlinks, so `install.sh` copies `PLUGININFO` and `__init__.py` into the Windows plugins dir
-- After running `install.sh`, toggle the plugin off/on in Nicotine+ Preferences → Plugins to reload
+The plugin runs wherever Nicotine+ does. The one setup worth calling out is
+**WSL + a Windows-native Nicotine+**, since it needs an explicit copy step:
+
+- The repo lives in WSL; Nicotine+ runs natively on Windows, reading plugins
+  from `%APPDATA%\nicotine\plugins\upload_playlist\`.
+- Windows can't follow Linux symlinks, so `install.sh` copies `PLUGININFO` and
+  `__init__.py` across the `/mnt/c` boundary into the Windows plugins dir.
+- After running `install.sh`, toggle the plugin off/on in Nicotine+
+  Preferences → Plugins to reload.
+
+For a native install (Linux/macOS, or developing directly on Windows), point
+`install.sh` at the plugins dir with `NICOTINE_PLUGINS_DIR`, or just clone into
+it directly (see the README).
 
 ## Tooling and tests
 
@@ -235,3 +243,29 @@ Windows can't follow Linux symlinks, so editing in WSL requires an explicit sync
 
 ### `str.split("\\")[-1]` over `os.path.basename` for cross-OS paths
 When the filename separator is known to be backslash (e.g. Soulseek virtual paths), splitting manually is more reliable than `os.path.basename`, which is OS-dependent.
+
+## Future ideas
+
+Unbuilt, roughly in priority order. All operate against the owned SQLite store
+rather than Nicotine+'s rolling state.
+
+**More commands:**
+- `/playlist-clear` — empty the playlist and the underlying history DB (with a confirmation step).
+- `/playlist-stats` — counts by user, by file type, by album.
+- `/playlist-open` — launch the playlist in the default player (platform-dependent).
+
+**Nice-to-haves:**
+- **Per-user playlists** — split into `uploads_by_<username>.m3u` files alongside the master.
+- **Duration in `#EXTINF`** — currently `-1` (unknown). Parsing it means reading file headers; stdlib `wave`/`aifc` cover a few formats, the rest would need a hand-rolled parser.
+- **Richer display names** — parse metadata tags for `Artist - Title`. Needs a stdlib-only parser (no mutagen — can't install packages into Nicotine+).
+- **Playlist rotation** — cap the M3U at N entries or bytes and archive older entries. Probably unnecessary at typical usage.
+- **Multiple output formats** — optionally also write `.m3u8` (explicit UTF-8) or `.pls`.
+
+## Non-goals
+
+Deliberately out of scope:
+
+- **Parsing `.dbn` share databases** — binary, fragile, no upside over our own log.
+- **Watching `uploads.json` in real time** — the live hook already delivers the event cleanly; no reason to scrape rolling state.
+- **Third-party runtime deps** (mutagen, etc.) — Nicotine+ can't install packages; stdlib only.
+- **Custom settings UI** — Nicotine+ only offers bool/int/float/string/list/radio/dropdown widgets and chat commands. No custom widgets or action buttons.

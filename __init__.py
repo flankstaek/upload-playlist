@@ -61,6 +61,10 @@ class Plugin(BasePlugin):
         }
 
         self.commands = {
+            "playlist-path": {
+                "description": "Print the current playlist file path",
+                "callback": self.cmd_path,
+            },
             "playlist-backfill": {
                 "description": "Import historical uploads from Nicotine+'s uploads.json",
                 "callback": self.cmd_backfill,
@@ -133,6 +137,10 @@ class Plugin(BasePlugin):
                 return
 
         self.log(f"Added to playlist: {display_name} (downloaded by {user})")
+
+    def cmd_path(self, args, **kwargs):
+        self.output(self._playlist_path)
+        return True
 
     def cmd_backfill(self, args, **kwargs):
         count = self._import_uploads_json()
