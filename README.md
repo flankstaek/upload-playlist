@@ -22,7 +22,10 @@ plugin's internal ID.
 
 ### Option A — download a release (simplest)
 
-1. Download `upload_playlist.zip` from the [latest release](https://github.com/flankstaek/upload-playlist/releases/latest).
+1. Download `upload_playlist.zip` from either release channel — same artifact,
+   pick whichever you prefer:
+   - [GitHub release](https://github.com/flankstaek/upload-playlist/releases/latest)
+   - [Tangled release artifact](https://tangled.org/flankstaek.me/upload-playlist) (see the repo's tags/artifacts)
 2. Extract it into your plugins directory (see table above). You should end up
    with a `upload_playlist/` folder containing `__init__.py` and `PLUGININFO`.
 3. In Nicotine+: **Preferences → Plugins → enable "Upload Playlist"**.

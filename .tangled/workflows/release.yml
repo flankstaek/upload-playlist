@@ -1,0 +1,72 @@
+when:
+  - event: ["push"]
+    tag: ["v*"] # trigger on version tags
+
+engine: microvm
+image: nixos
+
+dependencies:
+  - zip
+
+steps:
+  - name: "Build plugin zip"
+    command: |
+      set -euo pipefail
+      mkdir -p upload_playlist
+      cp PLUGININFO __init__.py upload_playlist/
+      zip -r upload_playlist.zip upload_playlist/
+
+  - name: "Publish artifact record"
+    command: |
+      set -euo pipefail
+      # Resolved from the flankstaek.me handle: DID did:plc:epulbt6gm3jsjal32oggvngu,
+      # hosted on a Bluesky PDS (not tngl.sh). Records written here are picked up
+      # by Tangled via jetstream.
+      PDS="https://stinkhorn.us-west.host.bsky.network"
+      ATP_IDENTIFIER="flankstaek.me"
+      ARTIFACT_PATH="upload_playlist.zip"
+      ARTIFACT_NAME="upload_playlist.zip"
+
+      # ATP_APP_PASSWORD must be set under the spindle's Settings -> Secrets.
+      session=$(curl -fsS -X POST "$PDS/xrpc/com.atproto.server.createSession" \
+        -H "Content-Type: application/json" \
+        -d "{\"identifier\":\"$ATP_IDENTIFIER\",\"password\":\"$ATP_APP_PASSWORD\"}")
+      jwt=$(echo "$session" | jq -r .accessJwt)
+      did=$(echo "$session" | jq -r .did)
+
+      # upload the zip as a blob
+      blob=$(curl -fsS -X POST "$PDS/xrpc/com.atproto.repo.uploadBlob" \
+        -H "Authorization: Bearer $jwt" \
+        -H "Content-Type: application/zip" \
+        --data-binary @"$ARTIFACT_PATH")
+
+      # requires an annotated tag (release.sh creates one with `git tag -a`)
+      tag_hash=$(git rev-parse "$TANGLED_REF_NAME^{tag}")
+      tag_bytes=$(printf '%s' "$tag_hash" | xxd -r -p | base64 | tr -d '=')
+
+      # build the sh.tangled.repo.artifact record
+      record=$(jq -n \
+        --arg did "$did" \
+        --arg tag "$tag_bytes" \
+        --arg name "$ARTIFACT_NAME" \
+        --arg repo "$TANGLED_REPO_URL" \
+        --arg created "$(date -Iseconds)" \
+        --argjson blob "$(echo "$blob" | jq .blob)" '{
+          repo: $did,
+          collection: "sh.tangled.repo.artifact",
+          validate: false,
+          record: {
+            "$type": "sh.tangled.repo.artifact",
+            tag: {"$bytes": $tag},
+            name: $name,
+            repo: $repo,
+            artifact: $blob,
+            createdAt: $created
+          }
+        }')
+
+      # create the record on the PDS
+      curl -fsS -X POST "$PDS/xrpc/com.atproto.repo.createRecord" \
+        -H "Authorization: Bearer $jwt" \
+        -H "Content-Type: application/json" \
+        -d "$record"

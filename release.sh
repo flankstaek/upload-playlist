@@ -25,7 +25,9 @@ else
     git commit -m "Release ${tag}"
 fi
 
-git tag "$tag"
+# Annotated tag (-a): the Tangled release workflow derives the artifact's tag
+# hash via `git rev-parse "<tag>^{tag}"`, which only resolves for a tag object.
+git tag -a "$tag" -m "Release ${tag}"
 git push all main --tags
 
 echo "Released ${tag}"
