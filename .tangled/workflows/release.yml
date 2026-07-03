@@ -47,12 +47,25 @@ steps:
       tag_hash=$(git rev-parse "$TANGLED_REF_NAME^{tag}")
       tag_bytes=$(printf '%s' "$tag_hash" | xxd -r -p | base64 | tr -d '=')
 
+      # The artifact's `repo` field is an at-uri to this repo's sh.tangled.repo
+      # record — NOT the knot URL in $TANGLED_REPO_URL. Resolve it by name from
+      # the owner's PDS (robust to the repo record being recreated).
+      repo_uri=$(curl -fsS \
+        "$PDS/xrpc/com.atproto.repo.listRecords?repo=$TANGLED_REPO_DID&collection=sh.tangled.repo&limit=100" \
+        | jq -r --arg name "$TANGLED_REPO_NAME" \
+            '.records[] | select(.value.name == $name) | .uri' | head -n1)
+      if [ -z "$repo_uri" ]; then
+        echo "Could not resolve sh.tangled.repo at-uri for $TANGLED_REPO_NAME" >&2
+        exit 1
+      fi
+
       # build the sh.tangled.repo.artifact record
       record=$(jq -n \
         --arg did "$did" \
         --arg tag "$tag_bytes" \
         --arg name "$ARTIFACT_NAME" \
-        --arg repo "$TANGLED_REPO_URL" \
+        --arg repo "$repo_uri" \
+        --arg repodid "$TANGLED_REPO_DID" \
         --arg created "$(date -Iseconds)" \
         --argjson blob "$(echo "$blob" | jq .blob)" '{
           repo: $did,
@@ -63,6 +76,7 @@ steps:
             tag: {"$bytes": $tag},
             name: $name,
             repo: $repo,
+            repoDid: $repodid,
             artifact: $blob,
             createdAt: $created
           }
