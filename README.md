@@ -143,5 +143,10 @@ Releases are cut by pushing a CalVer tag (`v2026.05.26`) — see
 
 - [`docs/architecture.md`](docs/architecture.md) — how it works, design decisions, and hard-won lessons
 - [`docs/nicotine-plugin-dev-reference.md`](docs/nicotine-plugin-dev-reference.md) — condensed reference for the Nicotine+ plugin API
+
+## License
+
+[GPLv3](LICENSE), matching Nicotine+ — the plugin subclasses its `BasePlugin`
+API and runs in-process, so it inherits the host application's license.
 </content>
 </invoke>

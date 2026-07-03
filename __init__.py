@@ -1,3 +1,9 @@
+# Upload Playlist — a Nicotine+ plugin.
+# Copyright (C) 2026 flankstaek
+#
+# Licensed under the GNU General Public License v3.0 (matching Nicotine+).
+# See the LICENSE file for the full text.
+
 import json
 import os
 import sqlite3
