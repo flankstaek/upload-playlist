@@ -48,12 +48,15 @@ steps:
       tag_bytes=$(printf '%s' "$tag_hash" | xxd -r -p | base64 | tr -d '=')
 
       # The artifact's `repo` field is an at-uri to this repo's sh.tangled.repo
-      # record — NOT the knot URL in $TANGLED_REPO_URL. Resolve it by name from
-      # the owner's PDS (robust to the repo record being recreated).
+      # record — NOT the knot URL in $TANGLED_REPO_URL. Look it up on the owner's
+      # PDS. Note: despite the docs, $TANGLED_REPO_NAME is the record's rkey/TID
+      # (e.g. 3mj6sviq6li22), not the display name — so match on either the rkey
+      # (at-uri suffix) or the record's name field, whichever it turns out to be.
       repo_uri=$(curl -fsS \
         "$PDS/xrpc/com.atproto.repo.listRecords?repo=$TANGLED_REPO_DID&collection=sh.tangled.repo&limit=100" \
-        | jq -r --arg name "$TANGLED_REPO_NAME" \
-            '.records[] | select(.value.name == $name) | .uri' | head -n1)
+        | jq -r --arg n "$TANGLED_REPO_NAME" \
+            '.records[] | select(.value.name == $n or (.uri | endswith("/" + $n))) | .uri' \
+        | head -n1)
       if [ -z "$repo_uri" ]; then
         echo "Could not resolve sh.tangled.repo at-uri for $TANGLED_REPO_NAME" >&2
         exit 1
