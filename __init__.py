@@ -79,6 +79,10 @@ class Plugin(BasePlugin):
                 "description": "Regenerate the playlist from the history database",
                 "callback": self.cmd_reload,
             },
+            "playlist-clear": {
+                "description": "Delete all upload history and empty the playlist",
+                "callback": self.cmd_clear,
+            },
         }
 
     def init(self):
@@ -166,6 +170,22 @@ class Plugin(BasePlugin):
             self.output(
                 "Could not regenerate: playlist file is open in another program. "
                 "Close it and try again."
+            )
+        return True
+
+    def cmd_clear(self, args, **kwargs):
+        # Empty the table but keep the DB file: on the next Nicotine+ start, init()
+        # sees an existing DB and skips the auto-backfill, so the wipe sticks.
+        with closing(self._db_connect()) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM uploads").fetchone()[0]
+            conn.execute("DELETE FROM uploads")
+            conn.commit()
+        if self._regenerate_m3u():
+            self.output(f"Cleared {count} entries; playlist is now empty.")
+        else:
+            self.output(
+                f"Cleared {count} entries from history, but the playlist file is open in "
+                "another program. Close it and run /playlist-reload."
             )
         return True
 

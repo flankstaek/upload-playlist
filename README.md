@@ -80,6 +80,7 @@ Type these in any Nicotine+ chat:
 - `/playlist-path` — print the current playlist file path
 - `/playlist-reload` — rebuild the playlist from history (use after changing a setting)
 - `/playlist-backfill` — re-import historical uploads from Nicotine+'s `uploads.json`, then rebuild
+- `/playlist-clear` — wipe all history and empty the playlist (start fresh)
 
 ### Settings
 

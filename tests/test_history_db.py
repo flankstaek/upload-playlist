@@ -335,6 +335,47 @@ def test_regenerate_m3u_dedup_keeps_first_occurrence_even_with_null_ts(plugin):
     assert "2026-05-17" not in content  # first-occurrence (NULL ts) wins
 
 
+def test_cmd_clear_empties_table_and_playlist(plugin):
+    _insert(plugin, "alice", "v\\a.mp3", "/x/a.mp3")
+    _insert(plugin, "bob", "v\\b.mp3", "/x/b.mp3")
+    plugin._regenerate_m3u()
+
+    plugin.cmd_clear("")
+
+    conn = sqlite3.connect(plugin._history_db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM uploads").fetchone()[0] == 0
+    finally:
+        conn.close()
+    assert _read_m3u(plugin) == "#EXTM3U\n"
+
+
+def test_cmd_clear_survives_reinit_without_rebackfill(plugin, tmp_path, monkeypatch):
+    """Clear keeps the DB file, so a later init() must not auto-backfill from uploads.json."""
+    data_dir = tmp_path / "nicotine"
+    data_dir.mkdir()
+    _write_uploads_json(
+        data_dir / "uploads.json",
+        [["alice", "music\\a.mp3", str(tmp_path), "Finished"]],
+    )
+    monkeypatch.setattr(plugin, "_nicotine_data_dirs", lambda: [str(data_dir)])
+
+    _insert(plugin, "alice", "v\\a.mp3", "/x/a.mp3")
+    plugin.cmd_clear("")
+
+    # Simulate a Nicotine+ restart: fresh plugin instance, same paths.
+    p2 = Plugin()
+    p2.settings["playlist_path"] = plugin._playlist_path
+    p2._nicotine_data_dirs = lambda: [str(data_dir)]
+    p2.init()
+
+    conn = sqlite3.connect(p2._history_db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM uploads").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def _write_uploads_json(path, rows):
     path.write_text(json.dumps(rows), encoding="utf-8")
 

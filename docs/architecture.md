@@ -109,6 +109,7 @@ We deliberately don't try to integration-test against real Nicotine+ from CI. It
 - `/playlist-path` — Prints the current playlist file path
 - `/playlist-backfill` — Re-imports Nicotine+'s `uploads.json(.old)` into the history DB (idempotent via `INSERT OR IGNORE`), then regenerates the M3U
 - `/playlist-reload` — Regenerates the M3U from the history DB. Use after changing `dedup` or recovering a deleted playlist file.
+- `/playlist-clear` — Deletes every row from the `uploads` table and regenerates an empty M3U. Keeps the DB *file* so the next `init()` sees an existing DB and skips the auto-backfill — otherwise the wipe would be undone by a re-import from `uploads.json` on the next start.
 
 ## Key design decisions
 
