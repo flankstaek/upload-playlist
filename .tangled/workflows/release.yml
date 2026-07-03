@@ -40,7 +40,10 @@ steps:
         -H "Content-Type: application/zip" \
         --data-binary @"$ARTIFACT_PATH")
 
-      # requires an annotated tag (release.sh creates one with `git tag -a`)
+      # The spindle checks out the tagged commit but not the tag object itself, so
+      # the annotated tag isn't resolvable locally — fetch tags before reading its
+      # hash. (release.sh creates an annotated tag with `git tag -a`.)
+      git fetch --tags --force
       tag_hash=$(git rev-parse "$TANGLED_REF_NAME^{tag}")
       tag_bytes=$(printf '%s' "$tag_hash" | xxd -r -p | base64 | tr -d '=')
 
