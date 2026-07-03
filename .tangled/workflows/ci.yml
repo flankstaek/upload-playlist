@@ -9,9 +9,12 @@ dependencies:
   nixpkgs:
     - python312
     - uv
+    - ruff
 
 steps:
   - name: "Lint"
-    command: "uv sync --frozen && uv run ruff check && uv run ruff format --check"
+    # ruff comes from nixpkgs, not the pip wheel: the wheel is a prebuilt ELF
+    # that expects the FHS dynamic loader, which the nix runner doesn't provide.
+    command: "ruff check && ruff format --check"
   - name: "Test"
-    command: "uv run pytest"
+    command: "uv sync --frozen && uv run pytest"
